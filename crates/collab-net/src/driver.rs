@@ -265,7 +265,7 @@ impl<S: Socket> Driver<S> {
         if let Some(c) = self.conn.as_mut() {
             c.last_sent = now;
         }
-        message::encode(msg).is_ok_and(|b| crate::transfer::packets(&b, self.sock.chunked()).all(|p| self.sock.send(&p)))
+        crate::assets_wire::client(msg, false).is_ok_and(|b| crate::transfer::packets(&b, self.sock.chunked()).all(|p| self.sock.send(&p)))
     }
 
     /// The connection ended: close it, then stop or plan the reconnect.

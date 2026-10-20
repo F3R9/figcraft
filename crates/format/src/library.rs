@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use figcraft_doc::{ImageData, LibraryManifest, NodeKind, PublishedLibrary, used_images};
 
-use crate::{FormatError, MAX_MEMBER, from_json, image_data, io_err, json_options, put, put_json, read_member};
+use crate::{FormatError, MAX_MEMBER, image_data, io_err, json_options, put, put_json, read_member};
 
 const MANIFEST: &str = "library/manifest.json";
 const SNAPSHOT: &str = "library/document.json";
@@ -50,7 +50,8 @@ pub(crate) fn write<W: Write + Seek>(z: &mut zip::ZipWriter<W>, lib: &PublishedL
     put_json(z, SNAPSHOT, &lib.doc)?;
     for (hash, img) in &lib.doc.images {
         if !written.contains(hash) && is_valid_hash(hash) {
-            put(z, &format!("{IMAGES}{hash}"), stored, &img.bytes)?;
+            let bytes = figcraft_assets::require(&img.bytes, img.asset.as_ref()).map_err(FormatError::Io)?;
+            put(z, &format!("{IMAGES}{hash}"), stored, &bytes)?;
         }
     }
     Ok(())
@@ -73,7 +74,7 @@ pub(crate) fn read<R: Read + Seek>(
     }
     let text = String::from_utf8(read_member(z, SNAPSHOT, budget.min(MAX_MEMBER))?).map_err(corrupt)?;
     let mut budget = budget.saturating_sub(text.len() as u64).min(MAX_IMAGE_BYTES);
-    let (mut doc, _) = from_json(&text)?;
+    let (mut doc, _, _) = crate::parse_json(&text)?;
     for hash in used_images(&doc) {
         if !is_valid_hash(&hash) {
             continue;
@@ -87,6 +88,9 @@ pub(crate) fn read<R: Read + Seek>(
         let Some(data) = name.and_then(|n| read_member(z, &n, budget.min(MAX_MEMBER)).ok()) else { continue };
         budget = budget.saturating_sub(data.len() as u64);
         doc.images.insert(hash, image_data(data));
+    }
+    if doc.images.values().any(|image| image.asset.is_some()) {
+        return Err(crate::external_images());
     }
     // Keep what the snapshot really holds; clip what people see.
     manifest.components.retain(|a| doc.node(a.id).is_some_and(|n| matches!(n.kind, NodeKind::Component { .. } | NodeKind::ComponentSet { .. })));

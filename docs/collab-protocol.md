@@ -1,5 +1,67 @@
 # Real-time collaboration protocol (draft)
 
+## Binary and deferred images (native extension, 2026-10-20)
+
+An echoed `X-FigCraft-Assets: figcraft.assets.v1` header, together with chunk negotiation,
+enables binary image uploads and deferred image downloads on native connections. The browser
+currently keeps the complete legacy document. An older client or server also keeps the legacy
+base64 image entries on the same connection; there is no edit replay during negotiation.
+
+`Change::Image` carries an image key, dimensions, SHA-256, encoded byte length and optional raw
+binary bytes. The transport sends references in snapshots, catch-up batches and rejection fixes.
+The guest fetches immutable payloads with `FetchAsset`; an `Asset` response is accepted only for
+an outstanding request, checked against both length and digest, and written to a disk cache.
+Client uploads must include the bytes: a guessed digest cannot attach another file's cache data.
+The core still orders image edits atomically with the other document operations.
+
+Cache identity is scoped to the authenticated server origin and file id, derived locally by
+the guest. Remote scopes are ignored and outgoing requests strip the local scope. Only members
+of a joined file can request its current or retained historical digests. The persistent server
+keeps that bounded authorization catalog in each file's `asset-history.json`, across restarts.
+It retains at most 40,000 references, prioritizing current images (at most 20,000).
+
+Canvas cache misses start downloads without waiting on the network. At most two requests are
+in flight per connection; pending requests reserve at most 128 MiB of encoded data globally
+(one larger image can run alone), with bounded request counts and a 512 MiB per-image ceiling.
+The native cache is at most 8 GiB / 20,000 encoded files, with checksum validation and eviction.
+`FIGCRAFT_ASSET_CACHE_DIR` selects its root; otherwise it uses the operating system's local
+cache directory. It is private working data, not a shared folder or a replacement for backups.
+Downloads invalidate rendered pixels, without document edits, dirty flags or undo entries.
+
+Normal Save materializes every referenced image, one at a time, into a self-contained archive.
+Exports and rasterisation wait for their required resources and report unavailable images.
+Private crash-recovery archives can retain references without downloading all images. Ordinary
+opened archives cannot grant access to arbitrary cache scopes: missing embedded bytes are an
+error. Actual image edits retain binary undo payloads; merely viewing an image does not put its
+bytes into document/undo clones. An unavailable historical payload rejects that edit explicitly;
+transient network loss keeps normal reconnect/offline replay behaviour.
+
+Limits: the server still imports and holds the complete document, and its first lazy welcome
+populates the encoded source cache; this is not streaming import or a complete asset-storage
+redesign. Historical payloads can be evicted from the bounded cache; the authorization catalog
+does not promise permanent image/version storage. Saving an uncached image needs its live session.
+Existing file quotas and connection budgets still apply. Transfer progress, byte-offset resume
+and browser deferred loading remain separate work.
+
+Persistence compatibility: new builds read legacy base64 journals and the appended binary image
+operation. Old binaries cannot read journals/snapshots containing the new operation; back up the
+server data directory before upgrading and restore that backup to downgrade. Wire compatibility
+with old peers does not imply persisted-data downgrade compatibility.
+
+Regressions: `lazy_asset_tests.rs` covers cold-cache viewport requests, self-contained Save,
+reference-only recovery, legacy peers, cross-file authorization, corrupt and unsolicited
+responses. The assets crate checks bounded/deduplicated requests, scoped cache isolation and
+corruption. Core/engine tests cover large-image undo and downloads that do not create edits.
+
+Local validation on Windows (optimized development build, separate host and guest processes,
+empty isolated caches): a 1,551,219,515-byte imported document retained both pages, 16,626 nodes
+and all 759 image digests. Its welcome was 35,536,083 bytes with zero encoded image bytes in
+the guest document. After fetching one 4,770,592-byte image, exactly one image was cached and
+the guest document still held zero encoded image bytes. Sampled peak private memory was
+891.2 MiB for the guest and 3,727.5 MiB for the host. This is an opening/one-image check, not
+a claim about maximum memory when all images are viewed, decoded or exported. The private
+document and payloads are not part of the repository or test fixtures.
+
 ## Chunked transport extension (2026-10-20)
 
 Peers negotiate `figcraft.chunks.v1` through an echoed `X-FigCraft-Transfer` handshake header

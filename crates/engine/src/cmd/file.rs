@@ -113,7 +113,7 @@ pub fn specs() -> Vec<CommandSpec> {
             false,
             |s, p| {
                 let path = req_string("file.recover", p, "path")?;
-                s.docs.push(recovered(&path)?);
+                s.docs.push(recovered_mode(&path, p.get("allowRemoteReferences").and_then(Value::as_bool).unwrap_or(false))?);
                 s.active = s.docs.len() - 1;
                 Ok(json!({"index": s.active}))
             }
@@ -443,7 +443,14 @@ fn restore_version(s: &mut Session, p: &Value) -> Result<Value> {
 
 /// The recovery copy at `path` as a document with unsaved changes and no path.
 pub(crate) fn recovered(path: &str) -> Result<DocState> {
-    let loaded = read(path).and_then(|b| figcraft_format::load_bytes_with_versions(&b).map_err(|e| EngineError::Other(e.to_string())))?;
+    recovered_mode(path, true)
+}
+
+fn recovered_mode(path: &str, references_allowed: bool) -> Result<DocState> {
+    let loaded = read(path).and_then(|b| {
+        if references_allowed { figcraft_format::load_recovery_bytes_with_versions(&b) } else { figcraft_format::load_bytes_with_versions(&b) }
+            .map_err(|e| EngineError::Other(e.to_string()))
+    })?;
     Ok(DocState::new(loaded.doc, None).with_versions(loaded.versions).with_branches(loaded.branches).unsaved())
 }
 
@@ -940,6 +947,7 @@ pub fn export_bytes_with(doc: &Document, ids: &[NodeId], setting: &ExportSetting
         return Err(nothing());
     }
     let drawn = drawn_layers(doc, ids, setting);
+    figcraft_render::images::require_for_nodes(doc, &drawn).map_err(EngineError::Other)?;
     if matches!(setting.format, ExportFormat::Svg | ExportFormat::Pdf) {
         figcraft_render::check_export_depth(doc, &drawn).map_err(|e| EngineError::Other(e.to_string()))?;
     }
@@ -980,6 +988,7 @@ pub fn export_bytes_with(doc: &Document, ids: &[NodeId], setting: &ExportSetting
 /// What Copy as PNG puts on the clipboard: the layers together, at 2x (in the document's colour
 /// profile; the clipboard wants sRGB).
 pub fn copy_png(doc: &Document, ids: &[NodeId]) -> Option<figcraft_render::Pixmap> {
+    figcraft_render::images::require_for_nodes(doc, ids).ok()?;
     let area = export_area(doc, ids, &ExportSetting::default())?;
     figcraft_render::render_area(doc, &super::edit::z_sorted(doc, ids), area, 2.0)
 }

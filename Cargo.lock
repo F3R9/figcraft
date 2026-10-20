@@ -1439,6 +1439,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "figcraft-assets"
+version = "0.7.0"
+dependencies = [
+ "postcard",
+ "serde",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "figcraft-cli"
 version = "0.7.0"
 dependencies = [
@@ -1457,6 +1467,7 @@ name = "figcraft-collab"
 version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
+ "figcraft-assets",
  "figcraft-color",
  "figcraft-doc",
  "figcraft-geom",
@@ -1472,15 +1483,19 @@ name = "figcraft-collab-net"
 version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
+ "figcraft-assets",
  "figcraft-collab",
  "figcraft-doc",
  "figcraft-engine",
+ "figcraft-format",
+ "figcraft-render",
  "getrandom 0.4.3",
  "js-sys",
  "log",
  "proptest",
  "rustls",
  "rustls-pki-types",
+ "serde",
  "serde_json",
  "sha2",
  "tungstenite",
@@ -1504,6 +1519,7 @@ dependencies = [
 name = "figcraft-doc"
 version = "0.7.0"
 dependencies = [
+ "figcraft-assets",
  "figcraft-color",
  "figcraft-geom",
  "imbl",
@@ -1518,6 +1534,7 @@ version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
  "craft-docpath",
+ "figcraft-assets",
  "figcraft-collab",
  "figcraft-color",
  "figcraft-doc",
@@ -1544,6 +1561,7 @@ dependencies = [
 name = "figcraft-format"
 version = "0.7.0"
 dependencies = [
+ "figcraft-assets",
  "figcraft-doc",
  "figcraft-pathops",
  "flate2",
@@ -1600,6 +1618,7 @@ dependencies = [
 name = "figcraft-pdf"
 version = "0.7.0"
 dependencies = [
+ "figcraft-assets",
  "figcraft-color",
  "figcraft-doc",
  "figcraft-geom",
@@ -1631,6 +1650,7 @@ name = "figcraft-render"
 version = "0.7.0"
 dependencies = [
  "crc32fast",
+ "figcraft-assets",
  "figcraft-color",
  "figcraft-doc",
  "figcraft-geom",
@@ -1651,6 +1671,7 @@ dependencies = [
  "crc32fast",
  "ctrlc",
  "env_logger",
+ "figcraft-assets",
  "figcraft-collab",
  "figcraft-collab-net",
  "figcraft-doc",
@@ -1673,6 +1694,7 @@ name = "figcraft-svg"
 version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
+ "figcraft-assets",
  "figcraft-color",
  "figcraft-doc",
  "figcraft-geom",
