@@ -14,6 +14,12 @@ fn text_of(s: &Session, id: NodeId) -> Result<TextData> {
 /// Start editing text node `id` with the caret at `caret` (None = select all).
 pub fn begin(s: &mut Session, id: NodeId, caret: Option<usize>, created: bool) -> Result<()> {
     let t = text_of(s, id)?;
+    if figcraft_text::appearance::has_saved(&t) && !figcraft_text::appearance::fonts_available(&t) {
+        return Err(EngineError::Disabled(
+            "text.edit".into(),
+            "Install the missing fonts or replace them with installed fonts before editing this text".into(),
+        ));
+    }
     let n = t.char_count();
     s.begin_interaction("Edit text")?;
     let ds = s.ds_mut()?;

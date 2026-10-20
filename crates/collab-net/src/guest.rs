@@ -52,6 +52,8 @@ pub struct Guest {
 enum Cmd {
     Fetch(u64, figcraft_assets::AssetRef),
     AssetDone(u64),
+    Preview(u64, figcraft_assets::preview::Request),
+    PreviewDone(u64),
     Presence(Presence),
     /// For the server, in order (document changes).
     Send(ClientMsg),
@@ -271,8 +273,17 @@ fn session(
 ) -> Outcome {
     let Conn { reader, mut writer, sock } = c;
     let requests: Requests = Arc::default();
+    let previews: PreviewRequests = Arc::default();
     let reader = {
-        let ctx = ReaderCtx { inbox: inbox.clone(), tx: me.clone(), epoch, cfg: cfg.clone(), resume: resume.clone(), requests: requests.clone() };
+        let ctx = ReaderCtx {
+            inbox: inbox.clone(),
+            tx: me.clone(),
+            epoch,
+            cfg: cfg.clone(),
+            resume: resume.clone(),
+            requests: requests.clone(),
+            previews: previews.clone(),
+        };
         match std::thread::Builder::new().name("live-guest-read".into()).spawn(move || read_loop(reader, &ctx)) {
             Ok(t) => t,
             Err(e) => {
@@ -286,10 +297,16 @@ fn session(
     let mut welcomed = false;
     let mut throttle = Throttle::new(PRESENCE_INTERVAL);
     let mut asset_queue = std::collections::VecDeque::new();
+    let mut preview_queue = std::collections::VecDeque::new();
+    let mut preview_due = Instant::now();
+    let mut preview_rate = crate::net::Bucket::new((cfg.limits.rate * 0.5).clamp(1.0, 50.0), (cfg.limits.burst * 0.25).clamp(1.0, 100.0));
     let outcome = if send(&mut writer, &hello, &mut last_sent, &requests) {
         loop {
             let ping_at = last_sent + cfg.limits.keepalive;
-            let wake = earliest([throttle.due(), Some(ping_at)]).unwrap_or(ping_at);
+            let preview_wake =
+                (!preview_queue.is_empty() && welcomed && previews.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len() < 8)
+                    .then_some(preview_due);
+            let wake = earliest([throttle.due(), Some(ping_at), preview_wake]).unwrap_or(ping_at);
             let mut out = None;
             let mut now_send = Vec::new();
             match rx.recv_timeout(wake.saturating_duration_since(Instant::now())) {
@@ -302,6 +319,18 @@ fn session(
                         }
                     }
                 }
+                Ok(Cmd::Preview(e, request)) if e == epoch && writer.get_ref().previews => {
+                    if !previews.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&request) && !preview_queue.contains(&request) {
+                        if preview_queue.len() < 512 {
+                            preview_queue.push_back(request);
+                        } else {
+                            figcraft_assets::preview::failed(&request);
+                        }
+                    }
+                }
+                Ok(Cmd::PreviewDone(e)) if e == epoch => {}
+                Ok(Cmd::Preview(_, request)) => figcraft_assets::preview::failed(&request),
+                Ok(Cmd::PreviewDone(_)) => {}
                 Ok(Cmd::AssetDone(e)) if e == epoch => {}
                 Ok(Cmd::Fetch(..) | Cmd::AssetDone(_)) => {}
                 Ok(Cmd::Send(m)) if welcomed => now_send.push(m),
@@ -327,6 +356,27 @@ fn session(
             }
             if !now_send.iter().all(|m| send_edit(&mut writer, m, &mut last_sent, &requests, inbox)) {
                 break Outcome::Retry("the connection dropped".into());
+            }
+            if welcomed
+                && !preview_queue.is_empty()
+                && Instant::now() >= preview_due
+                && previews.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len() < 8
+            {
+                if preview_rate.take(Instant::now()) {
+                    let slots = 8usize.saturating_sub(previews.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len());
+                    let mut batch = Vec::new();
+                    for _ in 0..slots {
+                        let Some(request) = preview_queue.pop_front() else { break };
+                        previews.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(request.clone());
+                        batch.push(request);
+                    }
+                    if !batch.is_empty() && !send(&mut writer, &ClientMsg::FetchPreviews(batch), &mut last_sent, &requests) {
+                        break Outcome::Retry("the connection dropped".into());
+                    }
+                    preview_due = Instant::now() + Duration::from_millis(5);
+                } else {
+                    preview_due = Instant::now() + Duration::from_millis(20);
+                }
             }
             while requests.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len() < 2 && welcomed {
                 let Some(asset) = asset_queue.pop_front() else { break };
@@ -358,6 +408,7 @@ fn session(
 }
 
 /// Send one message; false when the connection is gone.
+type PreviewRequests = Arc<std::sync::Mutex<std::collections::BTreeSet<figcraft_assets::preview::Request>>>;
 type Requests = Arc<std::sync::Mutex<std::collections::BTreeSet<figcraft_assets::AssetRef>>>;
 
 fn send_edit(ws: &mut WebSocket<Duplex>, msg: &ClientMsg, last_sent: &mut Instant, requests: &Requests, inbox: &Inbox) -> bool {
@@ -408,6 +459,7 @@ fn send_result(ws: &mut WebSocket<Duplex>, msg: &ClientMsg, last_sent: &mut Inst
 
 struct ReaderCtx {
     requests: Requests,
+    previews: PreviewRequests,
     inbox: Inbox,
     tx: Sender<Cmd>,
     epoch: u64,
@@ -423,6 +475,13 @@ fn read_loop(mut ws: WebSocket<Duplex>, ctx: &ReaderCtx) {
     let loader: Arc<figcraft_assets::cache::Loader> = Arc::new(move |asset| tx.send(Cmd::Fetch(epoch, asset)).is_ok());
     let scope = figcraft_assets::AssetRef::of(format!("{}\n{}", ctx.cfg.invite.server.url(), ctx.cfg.invite.file).as_bytes()).sha256;
     figcraft_assets::cache::register_scope(&scope, &loader);
+    let tx = ctx.tx.clone();
+    let epoch = ctx.epoch;
+    let preview_loader: Arc<figcraft_assets::preview::Loader> = Arc::new(move |request| tx.send(Cmd::Preview(epoch, request)).is_ok());
+    if ws.get_ref().previews {
+        figcraft_assets::preview::register(&scope, &preview_loader);
+    }
+
     let outcome = loop {
         match ws.read() {
             Ok(Message::Binary(b)) => {
@@ -433,6 +492,31 @@ fn read_loop(mut ws: WebSocket<Duplex>, ctx: &ReaderCtx) {
                 };
                 match message::decode::<ServerMsg>(&b, ctx.cfg.limits.max_server_message) {
                     Ok(mut m) => {
+                        if let ServerMsg::Preview { mut request, bytes, error } = m {
+                            request.asset.scope = scope.clone();
+                            if !ws.get_ref().previews || !ctx.previews.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&request) {
+                                break Outcome::Refused("the host sent an unrequested image preview".into());
+                            }
+                            let valid = bytes
+                                .as_ref()
+                                .filter(|b| error.is_none() && b.0.len() <= figcraft_assets::preview::MAX_BYTES)
+                                .filter(|b| b.0.starts_with(b"\x89PNG\r\n\x1a\n"))
+                                .filter(|b| {
+                                    figcraft_render::images::dimensions(&b.0)
+                                        .is_some_and(|(w, h)| w > 0 && h > 0 && w <= u32::from(request.side) && h <= u32::from(request.side))
+                                });
+                            match valid {
+                                Some(bytes) => {
+                                    if let Err(reason) = figcraft_assets::preview::store(&request, bytes.0.clone()) {
+                                        break Outcome::Refused(reason);
+                                    }
+                                }
+                                None => figcraft_assets::preview::failed(&request),
+                            }
+                            ctx.inbox.push(Event::AssetsChanged);
+                            let _ = ctx.tx.send(Cmd::PreviewDone(ctx.epoch));
+                            continue;
+                        }
                         if let ServerMsg::Asset { mut asset, bytes, error } = m {
                             asset.scope = scope.clone();
                             if !ws.get_ref().assets || !ctx.requests.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&asset) {
@@ -486,6 +570,9 @@ fn read_loop(mut ws: WebSocket<Duplex>, ctx: &ReaderCtx) {
     };
     for asset in std::mem::take(&mut *ctx.requests.lock().unwrap_or_else(std::sync::PoisonError::into_inner)) {
         figcraft_assets::cache::failed(&asset, "the image's session disconnected");
+    }
+    for request in std::mem::take(&mut *ctx.previews.lock().unwrap_or_else(std::sync::PoisonError::into_inner)) {
+        figcraft_assets::preview::failed(&request);
     }
     let _ = ctx.tx.send(Cmd::Lost(ctx.epoch, outcome));
 }

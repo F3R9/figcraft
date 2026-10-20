@@ -16,6 +16,7 @@ figcraft-assets.workspace = true
 figcraft-engine = { workspace = true }
 figcraft-collab = { workspace = true }
 figcraft-doc = { workspace = true }
+figcraft-render.workspace = true
 log = { workspace = true }
 sha2 = { workspace = true }
 # `std::time::Instant` natively, the browser's clock in the web build.
@@ -44,6 +45,5 @@ windows-registry = "0.6"
 
 [dev-dependencies]
 figcraft-format.workspace = true
-figcraft-render.workspace = true
 proptest = { workspace = true }
 serde_json = { workspace = true }

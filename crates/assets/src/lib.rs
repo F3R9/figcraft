@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 pub mod cache;
+pub mod preview;
 
 /// The same per-image ceiling as native archive members, independent of document size.
 pub const MAX_ASSET_BYTES: u64 = 512 << 20;

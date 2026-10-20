@@ -135,9 +135,20 @@ fn missing_fonts(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(json!({"families": families}))
 }
 
+fn preserve_appearance(s: &mut Session, _: &Value) -> Result<Value> {
+    Ok(json!({"captured": figcraft_text::appearance::capture(s.ds_mut()?.doc_mut(), None)}))
+}
+
 /// The font commands: `text.missingFonts` and `text.refit`.
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        spec!(
+            "text.preserveAppearance",
+            "Preserve text appearance",
+            "{}  save portable glyph outlines for text whose fonts are installed → {captured}",
+            true,
+            preserve_appearance
+        ),
         spec!(
             "text.missingFonts",
             "Missing fonts",
