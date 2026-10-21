@@ -1524,6 +1524,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "serde_json",
+ "sha2",
  "tungstenite",
  "wasm-bindgen",
  "web-sys",

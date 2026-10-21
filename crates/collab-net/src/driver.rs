@@ -28,6 +28,12 @@ pub(crate) trait Socket {
     fn send(&mut self, bytes: &[u8]) -> bool;
     /// Close the connection normally; it reports nothing more.
     fn close(&mut self);
+    fn chunked(&self) -> bool {
+        false
+    }
+    fn fallback_legacy(&mut self) -> bool {
+        false
+    }
 }
 
 /// One connection attempt.
@@ -38,11 +44,12 @@ struct Conn {
     seen: Seen,
     last_sent: Instant,
     last_heard: Instant,
+    transfer: crate::transfer::Receiver,
 }
 
 impl Conn {
     fn new(now: Instant) -> Self {
-        Self { started: now, opened: false, welcomed: false, seen: Seen::default(), last_sent: now, last_heard: now }
+        Self { started: now, opened: false, welcomed: false, seen: Seen::default(), last_sent: now, last_heard: now, transfer: Default::default() }
     }
 }
 
@@ -118,7 +125,12 @@ impl<S: Socket> Driver<S> {
             return self.end(too_large(&self.cfg.limits), now);
         }
         c.last_heard = now;
-        let taken = match message::decode::<ServerMsg>(bytes, self.cfg.limits.max_server_message) {
+        let bytes = match c.transfer.push(bytes, self.sock.chunked(), self.cfg.limits.max_server_message) {
+            Ok(Some(b)) => b,
+            Ok(None) => return,
+            Err(e) => return self.end(Outcome::Refused(e), now),
+        };
+        let taken = match message::decode::<ServerMsg>(&bytes, self.cfg.limits.max_server_message) {
             // The join code's answer: join the file it opens, on a new connection.
             Ok(ServerMsg::Resolved { file, token }) if self.cfg.code.is_some() => {
                 return match resolved(&mut self.cfg, file, token) {
@@ -158,6 +170,11 @@ impl<S: Socket> Driver<S> {
     /// The connection closed (`code` and `reason` from the close frame; 1006 when it just broke).
     pub(crate) fn closed(&mut self, code: u16, reason: &str, now: Instant) {
         let Some(opened) = self.conn.as_ref().map(|c| c.opened) else { return };
+        if !opened && code == 1006 && self.sock.fallback_legacy() {
+            self.sock.close();
+            self.connect(now);
+            return;
+        }
         let outcome = match closed(code, reason) {
             Outcome::Retry(_) if !opened => Outcome::Retry(format!("no answer from {}", self.cfg.invite.server.display())),
             Outcome::Retry(_) if code == 1006 => Outcome::Retry("the connection dropped".into()),
@@ -248,7 +265,7 @@ impl<S: Socket> Driver<S> {
         if let Some(c) = self.conn.as_mut() {
             c.last_sent = now;
         }
-        message::encode(msg).is_ok_and(|b| self.sock.send(&b))
+        message::encode(msg).is_ok_and(|b| crate::transfer::packets(&b, self.sock.chunked()).all(|p| self.sock.send(&p)))
     }
 
     /// The connection ended: close it, then stop or plan the reconnect.
