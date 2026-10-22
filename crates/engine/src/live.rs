@@ -1621,7 +1621,11 @@ fn start_host(s: &mut Session, cmd: &str, p: &Value, bind: Bind, short: bool) ->
         Some("lan") => Bind::Lan,
         Some(other) => other.parse::<IpAddr>().map(Bind::Addr).map_err(|_| bad(cmd, "`bind` must be \"local\", \"lan\" or an IP address"))?,
     };
-    let (doc, uid) = s.ds().map(|ds| (ds.doc.clone(), ds.uid))?;
+    let (doc, uid) = s.ds().map(|ds| {
+        let mut doc = (*ds.doc).clone();
+        figcraft_text::appearance::capture(&mut doc, None);
+        (Arc::new(doc), ds.uid)
+    })?;
     let opts = HostOptions { port, bind, name: display_name(&s.prefs), doc, short };
     let (id, info) = s.live.start(cmd, |l, id| l.host(id, opts).map_err(|e| EngineError::Other(format!("couldn't start the live session: {e}"))))?;
     s.live.open(Live { id, status: Status::Live, info: Some(info), doc_uid: Some(uid), tab: Some(uid), ..Live::default() });
@@ -1639,7 +1643,11 @@ fn publish(s: &mut Session, p: &Value) -> Result<Value> {
 /// codes for others too): the new session.
 fn start_publish(s: &mut Session, cmd: &str, server: &str, p: &Value, share: bool) -> Result<SessionId> {
     let key = string(p, "key").map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
-    let (doc, uid) = s.ds().map(|ds| (ds.doc.clone(), ds.uid))?;
+    let (doc, uid) = s.ds().map(|ds| {
+        let mut doc = (*ds.doc).clone();
+        figcraft_text::appearance::capture(&mut doc, None);
+        (Arc::new(doc), ds.uid)
+    })?;
     let name = string(p, "name").map(|n| n.trim().chars().filter(|c| !c.is_control()).take(256).collect::<String>()).filter(|n| !n.is_empty());
     let me = display_name(&s.prefs);
     let opts = PublishOptions { server: server.trim().to_string(), key, name: name.unwrap_or_else(|| doc.name.clone()), me, doc, share };
