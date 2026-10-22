@@ -15,6 +15,10 @@ pub fn generation() -> u64 {
     GENERATION.load(std::sync::atomic::Ordering::Acquire)
 }
 
+pub fn notify_changed() {
+    GENERATION.fetch_add(1, std::sync::atomic::Ordering::Release);
+}
+
 #[derive(Default)]
 struct State {
     loaders: BTreeMap<String, Vec<Weak<Loader>>>,

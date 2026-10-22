@@ -1103,3 +1103,14 @@ Uploads are retained under the receiving session scope before their manifests re
 reconnecting download requests fail promptly instead of keeping save waiters pending.
 
 Peers that did not negotiate the resource extension cannot introduce typed image manifests or JSON image entries containing cache references. Native and browser receive paths reject them before accepting a welcome or applying changes; legacy inline images remain supported.
+
+## Display-sized previews (2026-10-20)
+
+Native connections can additionally negotiate `X-FigCraft-Previews: figcraft.previews.v1`.
+`FetchPreview` requests a 64–1024 pixel power-of-two view of an authorized original;
+`FetchPreviews` batches at most eight such requests, and `Preview` returns a display-only PNG.
+These variants are appended, leaving existing wire indexes unchanged.
+Old peers keep the original download path. Two bounded, deduplicated generation workers and
+scoped 64 MiB caches keep this work outside the sync hub. The guest permits eight preview
+requests alongside the two original requests. [Image previews](image-previews.md) describes
+validation, budgets, view levels and the full-original save/export guarantees.

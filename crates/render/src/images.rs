@@ -77,7 +77,7 @@ const MAX_DECODED_BYTES: u64 = 512 << 20;
 /// alone).
 const MAX_CACHED_BYTES: u64 = 512 << 20;
 /// The most entries each decoded-image cache holds.
-const MAX_CACHED_IMAGES: usize = 256;
+const MAX_CACHED_IMAGES: usize = 4096;
 
 /// Decoded pixmaps by image, filters and profile, holding at most a byte budget of pixels: adding
 /// one past the budget (or past [`MAX_CACHED_IMAGES`]) drops the least recently used first, so
@@ -139,6 +139,28 @@ fn fkey(f: &ImageFilters) -> [i32; 7] {
 /// Decode encoded image bytes into a premultiplied sRGB pixmap (max 16k per side).
 pub fn decode(bytes: &[u8]) -> Option<Pixmap> {
     decode_in(bytes, ColorProfile::Srgb).map(|(p, _)| p)
+}
+
+/// A display-sized PNG in sRGB, preserving alpha. Never replaces a document original.
+pub fn make_preview(bytes: &[u8], side: u32) -> Result<Vec<u8>, String> {
+    if !(64..=1024).contains(&side) || !side.is_power_of_two() {
+        return Err("invalid preview size".into());
+    }
+    let (p, _) = decode_within(bytes, ColorProfile::Srgb, MAX_SIDE, 128 << 20).ok_or("image cannot be decoded for a preview")?;
+    let p = shrink(&p, side).ok_or("image preview cannot be resized")?;
+    crate::encode_png(&p)
+}
+
+fn shrink(p: &Pixmap, side: u32) -> Option<Pixmap> {
+    let max = p.width().max(p.height());
+    if max <= side {
+        return Some(p.clone());
+    }
+    let w = (u64::from(p.width()) * u64::from(side) / u64::from(max)).max(1) as u32;
+    let h = (u64::from(p.height()) * u64::from(side) / u64::from(max)).max(1) as u32;
+    let source = image::RgbaImage::from_raw(p.width(), p.height(), p.data().to_vec())?;
+    let out = image::imageops::resize(&source, w, h, image::imageops::FilterType::Triangle);
+    Pixmap::from_vec(out.into_raw(), tiny_skia::IntSize::from_wh(w, h)?)
 }
 
 /// Decode encoded image bytes into a premultiplied pixmap (max 16k per side): converted from the
@@ -226,6 +248,61 @@ pub fn get(hash: &str, data: Option<&ImageData>, filters: &ImageFilters, profile
     let p = Arc::new(p);
     cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, p.clone(), MAX_CACHED_BYTES);
     Some(p)
+}
+
+/// The screen-sized level of an image. Small views request previews; saves and exports still
+/// require originals. Each level has a distinct cache key, so zooming never reuses blurry pixels.
+pub fn get_sized(hash: &str, data: Option<&ImageData>, filters: &ImageFilters, profile: ColorProfile, side: u32) -> Option<Arc<Pixmap>> {
+    let data = data?;
+    if side >= data.width.max(data.height) {
+        return get(hash, Some(data), filters, profile).or_else(|| lower_level(hash, data, filters, profile, u32::MAX));
+    }
+    let side = side.clamp(64, MAX_SIDE).next_power_of_two();
+    if side >= data.width.max(data.height) {
+        return get(hash, Some(data), filters, profile).or_else(|| lower_level(hash, data, filters, profile, side));
+    }
+    let key = (format!("{}:level:{side}", cache_key(hash, Some(data))), fkey(filters), profile);
+    if let Some(p) = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
+        return Some(p);
+    }
+    let bytes = if side <= 1024
+        && data.bytes.is_empty()
+        && let Some(asset) = &data.asset
+    {
+        let request = figcraft_assets::preview::Request { asset: asset.clone(), side: side as u16 };
+        match figcraft_assets::preview::resolve(&request) {
+            figcraft_assets::preview::Display::Ready(bytes) => bytes,
+            figcraft_assets::preview::Display::Pending => return lower_level(hash, data, filters, profile, side),
+            figcraft_assets::preview::Display::Unsupported => match figcraft_assets::resolve(&data.bytes, data.asset.as_ref()) {
+                Some(bytes) => bytes,
+                None => return lower_level(hash, data, filters, profile, side),
+            },
+        }
+    } else {
+        match figcraft_assets::resolve(&data.bytes, data.asset.as_ref()) {
+            Some(bytes) => bytes,
+            None => return lower_level(hash, data, filters, profile, side),
+        }
+    };
+    let (mut p, srgb) = decode_in(&bytes, profile)?;
+    finish(&mut p, filters, if srgb { profile } else { ColorProfile::Srgb });
+    let p = Arc::new(shrink(&p, side)?);
+    cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, p.clone(), MAX_CACHED_BYTES);
+    Some(p)
+}
+
+/// Keep the last displayed pixels while a sharper level is in flight, rather than flashing blank.
+fn lower_level(hash: &str, data: &ImageData, filters: &ImageFilters, profile: ColorProfile, wanted: u32) -> Option<Arc<Pixmap>> {
+    let identity = cache_key(hash, Some(data));
+    let mut c = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    for side in [8192, 4096, 2048, 1024, 512, 256, 128, 64] {
+        if side < wanted
+            && let Some(p) = c.get(&(format!("{identity}:level:{side}"), fkey(filters), profile))
+        {
+            return Some(p);
+        }
+    }
+    None
 }
 
 /// The filters, then the conversion into the document's colour space.
@@ -440,7 +517,7 @@ fn padded_cache() -> &'static Mutex<PixmapCache> {
 
 /// `pm` with a transparent 1-pixel border (cached).
 pub fn padded(hash: &str, filters: &ImageFilters, profile: ColorProfile, pm: &Pixmap) -> Option<Arc<Pixmap>> {
-    let key = (hash.to_string(), fkey(filters), profile);
+    let key = (format!("{hash}:{}x{}", pm.width(), pm.height()), fkey(filters), profile);
     if let Some(p) = padded_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
         return Some(p);
     }

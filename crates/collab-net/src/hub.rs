@@ -298,6 +298,7 @@ enum Push {
 #[derive(Clone)]
 struct Line {
     assets: bool,
+    previews: bool,
     tx: SyncSender<Out>,
     queued: Arc<AtomicUsize>,
     block: Arc<AtomicUsize>,
@@ -880,6 +881,7 @@ fn serve(mut stream: TcpStream, conn: u64, hub: &Sender<HubIn>, limits: NetLimit
     let mut forwarded = None;
     let mut chunked = false;
     let mut assets = false;
+    let mut previews = false;
     // The handshake callback's type is tungstenite's (its error is an HTTP response).
     #[allow(clippy::result_large_err)]
     let read_client = |req: &Request, mut resp: Response| -> Result<Response, ErrorResponse> {
@@ -891,6 +893,10 @@ fn serve(mut stream: TcpStream, conn: u64, hub: &Sender<HubIn>, limits: NetLimit
         let header = req.headers().get("X-FigCraft-Transfer").is_some_and(|v| v == crate::transfer::PROTOCOL);
         chunked = protocol || header;
         assets = chunked && req.headers().get("X-FigCraft-Assets").is_some_and(|v| v == crate::assets_wire::PROTOCOL);
+        previews = assets && req.headers().get("X-FigCraft-Previews").is_some_and(|v| v == crate::previews::PROTOCOL);
+        if previews {
+            resp.headers_mut().insert("X-FigCraft-Previews", tungstenite::http::HeaderValue::from_static(crate::previews::PROTOCOL));
+        }
         if assets {
             resp.headers_mut().insert("X-FigCraft-Assets", tungstenite::http::HeaderValue::from_static(crate::assets_wire::PROTOCOL));
         }
@@ -917,6 +923,8 @@ fn serve(mut stream: TcpStream, conn: u64, hub: &Sender<HubIn>, limits: NetLimit
     wr.chunked = chunked;
     ws.get_mut().assets = assets;
     wr.assets = assets;
+    ws.get_mut().previews = previews;
+    wr.previews = previews;
     if proxied && forwarded.is_none() {
         log::debug!("live session: connection {conn} came through the proxy without X-Forwarded-For");
     }
@@ -936,6 +944,7 @@ fn serve(mut stream: TcpStream, conn: u64, hub: &Sender<HubIn>, limits: NetLimit
     let (tx, rx) = sync_channel::<Out>(limits.queue.max(4));
     let out = Line {
         assets,
+        previews,
         tx,
         queued: Arc::default(),
         block: block.queued.clone(),
@@ -1298,6 +1307,66 @@ impl<B: Backend> Hub<B> {
 
     /// A message on connection `conn` (from `ip`), by what the connection is for.
     fn message(&mut self, conn: u64, ip: IpAddr, msg: ClientMsg, bytes: usize) {
+        if let ClientMsg::FetchPreviews(requests) = &msg {
+            if requests.is_empty() || requests.len() > 8 {
+                return self.kick(&[conn], "invalid image preview batch");
+            }
+            for request in requests {
+                if !self.conns.contains_key(&conn) {
+                    break;
+                }
+                self.message(conn, ip, ClientMsg::FetchPreview(request.clone()), 0);
+            }
+            return;
+        }
+        if let ClientMsg::FetchPreview(request) = &msg {
+            let Some(c) = self.conns.get(&conn) else { return };
+            let Kind::Joined { file, .. } = &c.kind else { return self.kick(&[conn], "join a file before requesting previews") };
+            if !c.out.previews || !request.valid() {
+                return self.kick(&[conn], "invalid or unnegotiated image preview");
+            }
+            let known = self.rooms.get(file).and_then(|room| room.assets.iter().find(|known| known.same_content(&request.asset)).cloned());
+            let Some(known) = known else { return self.kick(&[conn], "this image is not part of the joined file") };
+            let mut request = request.clone();
+            request.asset.scope.clear();
+            if let Some(bytes) = figcraft_assets::preview::load(&request) {
+                return self.answer(conn, &ServerMsg::Preview { request, bytes: Some(figcraft_assets::Blob(bytes)), error: None });
+            }
+            let source = self
+                .rooms
+                .get(file)
+                .and_then(|room| room.server.replica().asset_payload(&known))
+                .map(Ok)
+                .unwrap_or_else(|| figcraft_assets::cache::load(&known));
+            let out = c.out.clone();
+            let sock = c.sock.try_clone().ok();
+            let reply_request = request.clone();
+            match source {
+                Ok(source) => {
+                    if !crate::previews::submit(
+                        request.clone(),
+                        source,
+                        Box::new(move |result| {
+                            let (bytes, error) = match result {
+                                Ok(b) => (Some(figcraft_assets::Blob(b)), None),
+                                Err(e) => (None, Some(e)),
+                            };
+                            let msg = ServerMsg::Preview { request: reply_request, bytes, error };
+                            if let Some(bytes) = encode(&msg, true)
+                                && out.push(&bytes, &mut Charges::default(), false).is_err()
+                                && let Some(sock) = sock
+                            {
+                                shutdown(&sock);
+                            }
+                        }),
+                    ) {
+                        self.answer(conn, &ServerMsg::Preview { request, bytes: None, error: Some("image preview queue is busy".into()) });
+                    }
+                }
+                _ => self.answer(conn, &ServerMsg::Preview { request, bytes: None, error: Some("image preview is temporarily unavailable".into()) }),
+            }
+            return;
+        }
         if let ClientMsg::FetchAsset(asset) = &msg {
             let Some(c) = self.conns.get(&conn) else { return };
             let Kind::Joined { file, .. } = &c.kind else { return self.kick(&[conn], "join a file before requesting images") };

@@ -82,6 +82,7 @@ input.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | Negotiated display-sized image previews with bounded workers, scoped disposable caches, batching and resolution selection. Original-byte save/export guarantees retained. Readiness estimates unchanged. |
 | 2026-10-22 | minor | Scoped immutable original-image references and authorized binary downloads; exact originals remain authoritative for saves/exports. Recovery authority and cache/request regressions covered. No previews. Readiness estimates unchanged. |
 | 2026-10-22 | minor | Negotiated bounded chunk transport with checksummed reassembly, legacy fallback and configurable receive budgets; inline images retained. Readiness estimates unchanged. |
 | 2026-10-20 | minor | Added L0 `figcraft-assets`; image payloads can live outside guest document/undo clones in a bounded scoped disk cache. Native transport sends manifests and checked binary payloads; render generations invalidate pixels without document edits. Normal saves remain self-contained. |

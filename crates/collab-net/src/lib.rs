@@ -22,6 +22,8 @@ mod join;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod lazy_asset_tests;
 pub mod limits;
+#[cfg(not(target_arch = "wasm32"))]
+mod previews;
 mod sessions;
 pub mod throttle;
 mod transfer;

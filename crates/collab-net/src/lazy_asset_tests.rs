@@ -149,7 +149,7 @@ fn joining_one_file_does_not_grant_access_to_other_cached_assets() {
     let hello = Client::hello(&invite.file, &invite.token, "Test", "");
     send_binary(&mut ws, &crate::assets_wire::client(&hello, true).unwrap()).unwrap();
     assert!(matches!(receive(&mut ws).unwrap(), ServerMsg::Welcome { .. }));
-    send_binary(&mut ws, &crate::assets_wire::client(&message::ClientMsg::FetchAsset(foreign), true).unwrap()).unwrap();
+    send_binary(&mut ws, &crate::assets_wire::client(&message::ClientMsg::FetchAsset(foreign.clone()), true).unwrap()).unwrap();
     loop {
         if let ServerMsg::Asset { bytes, error, .. } = receive(&mut ws).unwrap() {
             assert!(bytes.is_none());
@@ -157,7 +157,83 @@ fn joining_one_file_does_not_grant_access_to_other_cached_assets() {
             break;
         }
     }
+    let request = figcraft_assets::preview::Request { asset: foreign, side: 128 };
+    send_binary(&mut ws, &crate::assets_wire::client(&message::ClientMsg::FetchPreview(request), true).unwrap()).unwrap();
+    assert!(matches!(receive(&mut ws).unwrap(), ServerMsg::Refused { .. }), "previews must enforce the original file authorization too");
     let _ = ws.close(None);
+}
+
+#[test]
+fn small_view_downloads_a_preview_and_zoom_and_save_keep_the_original() {
+    use figcraft_assets::preview::{self, Request};
+    let mut source = Document::new("Synthetic preview image");
+    let mut pix = figcraft_render::Pixmap::new(1600, 2400).unwrap();
+    for (i, p) in pix.data_mut().chunks_exact_mut(4).enumerate() {
+        let x = (i % 1600) as u32;
+        let y = (i / 1600) as u32;
+        let n = x.wrapping_mul(1664525).wrapping_add(y.wrapping_mul(1013904223));
+        let n = (n ^ (n >> 16)).wrapping_mul(2246822519);
+        p.copy_from_slice(&[(n >> 16) as u8, (n >> 8) as u8, n as u8, 255]);
+    }
+    let bytes = Arc::new(figcraft_render::encode_png(&pix).unwrap());
+    source.images.insert("portrait".into(), ImageData { asset: None, bytes: bytes.clone(), width: 1600, height: 2400 });
+    let id = source.create(source.first_page().unwrap(), NodeKind::Rectangle, "Portrait", 0.0, 0.0, 100.0, 150.0).unwrap();
+    source.get_mut(id).unwrap().fills = vec![Paint::image("portrait", ImageScaleMode::Fill)];
+    let (_host, invite) = host(source).unwrap();
+    let (_guest, mut probe, client) = joined(invite).unwrap();
+    let doc = client.document();
+    let asset = doc.images["portrait"].asset.as_ref().unwrap();
+    let request = Request { asset: asset.clone(), side: 256 };
+    assert!(cache::load(asset).is_err());
+    assert!(matches!(preview::resolve(&request), preview::Display::Pending));
+    probe.wait("small image preview", |_| preview::load(&request).is_some());
+    let small = preview::load(&request).unwrap();
+    assert!(small.len() < bytes.len() / 4, "preview {} vs original {}", small.len(), bytes.len());
+    assert_eq!(figcraft_render::images::dimensions(&small), Some((170, 256)));
+    assert!(cache::load(asset).is_err(), "general view must not silently download the full image");
+    let overview =
+        figcraft_render::images::get_sized("portrait", Some(&doc.images["portrait"]), &Default::default(), Default::default(), 256).unwrap();
+    assert_eq!(overview.height(), 256);
+    let closer = figcraft_render::images::get_sized("portrait", Some(&doc.images["portrait"]), &Default::default(), Default::default(), 512).unwrap();
+    assert_eq!(closer.height(), 256, "keep overview pixels until the sharper preview arrives");
+    let sharper = Request { asset: asset.clone(), side: 512 };
+    probe.wait("sharper preview", |_| preview::load(&sharper).is_some());
+    let closer = figcraft_render::images::get_sized("portrait", Some(&doc.images["portrait"]), &Default::default(), Default::default(), 512).unwrap();
+    assert_eq!(closer.height(), 512, "a new zoom level must not reuse the blurry cache entry");
+    let original = cache::require(asset).unwrap();
+    assert_eq!(*original, *bytes);
+    assert_eq!(*figcraft_format::load_bytes(&figcraft_format::save_bytes(doc, None).unwrap()).unwrap().0.images["portrait"].bytes, *bytes);
+}
+
+#[test]
+fn hundreds_of_warm_previews_do_not_trip_the_host_message_rate_limit() {
+    use figcraft_assets::preview::{self, Request};
+    let mut doc = Document::new("Synthetic warm preview gallery");
+    for i in 0..501u32 {
+        let mut p = figcraft_render::Pixmap::new(256, 256).unwrap();
+        for pixel in p.data_mut().chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[(i >> 8) as u8, i as u8, 171, 255]);
+        }
+        let bytes = Arc::new(figcraft_render::encode_png(&p).unwrap());
+        let request = Request { asset: AssetRef::of_arc(&bytes), side: 128 };
+        let small = Arc::new(figcraft_render::images::make_preview(&bytes, 128).unwrap());
+        preview::store(&request, small).unwrap();
+        doc.images.insert(format!("warm-{i}"), ImageData { asset: None, bytes, width: 256, height: 256 });
+    }
+    let (_host, invite) = host(doc).unwrap();
+    let (_guest, mut probe, client) = joined(invite).unwrap();
+    let requests: Vec<_> = client.document().images.values().map(|i| Request { asset: i.asset.clone().unwrap(), side: 128 }).collect();
+    probe.wait("warm gallery without rate refusal", |events| {
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::Status(figcraft_engine::live::Status::Failed { .. }))),
+            "a cached gallery must not disconnect"
+        );
+        for r in &requests {
+            let _ = preview::resolve(r);
+        }
+        requests.iter().all(|r| preview::load(r).is_some())
+    });
+    assert!(requests.iter().all(|r| cache::load(&r.asset).is_err()), "warm previews must not fall back to downloading originals");
 }
 
 #[test]
