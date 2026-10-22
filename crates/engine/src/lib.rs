@@ -1106,7 +1106,9 @@ impl Session {
         let changed = !Arc::ptr_eq(&ds.doc, &bdoc);
         // Saving may adopt the chosen filename as the document title. The encoded snapshot is
         // already final; normalising it again would detach it from the saved baseline.
-        if changed && !matches!(spec.id, "file.save" | "file.saveAs") {
+        // Hosting likewise only captures text metadata into the final shared document; keep its
+        // saved baseline and the host's view aligned with the snapshot sent to the link.
+        if changed && !matches!(spec.id, "file.save" | "file.saveAs" | "collab.host" | "collab.share") {
             normalize(ds.doc_mut(), &bdoc);
         }
         let edit = changed && ds.interaction.is_none();

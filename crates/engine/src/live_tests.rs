@@ -117,6 +117,47 @@ pub(crate) fn session() -> (Session, Arc<Mutex<Script>>) {
     (s, script)
 }
 
+#[test]
+fn hosting_retains_late_captured_geometry_locally_without_changing_dirty_state() {
+    use figcraft_doc::{NodeKind, TextData};
+    use figcraft_text::fontdb::{Face, FontBytes};
+
+    figcraft_text::scan_system_fonts();
+    let Some(font) = figcraft_text::find_face("Arial", "Regular") else {
+        eprintln!("late capture: no source face available for this system-font regression");
+        return;
+    };
+    for share in [false, true] {
+        for dirty in [false, true] {
+            let family = format!("Synthetic late sharing face {share} {dirty}");
+            let mut doc = Document::new("Synthetic late font indexing");
+            let mut text = TextData::new("Portable text");
+            text.style.font_family = family.clone();
+            let id = doc.create(doc.first_page().unwrap(), NodeKind::Text(text), "Text", 0.0, 0.0, 200.0, 40.0).unwrap();
+            let mut s = Session::with_document(doc);
+            let script = Arc::new(Mutex::new(Script::default()));
+            s.live.install(Box::new(Mock(script.clone())));
+            if dirty {
+                s.execute("node.set", &json!({"ids":[id],"props":{"x":12}})).unwrap();
+            }
+            assert_eq!(s.ds().unwrap().is_dirty(), dirty);
+            assert!(s.doc().unwrap().node(id).unwrap().kind.text().unwrap().appearance.is_none());
+            // Simulate the font scan finishing after the file has already opened.
+            let face = Face::from_bytes(FontBytes::Shared(Arc::new(font.bytes.data().to_vec())), font.index, Some(&family), Some("Regular")).unwrap();
+            figcraft_text::db().write().unwrap().add(face);
+            let (command, params) = if share { ("collab.share", json!({"via":"local"})) } else { ("collab.host", json!({})) };
+            s.execute(command, &params).unwrap();
+            let ds = s.ds().unwrap();
+            assert_eq!(ds.is_dirty(), dirty);
+            let n = ds.doc.node(id).unwrap();
+            assert!(figcraft_text::appearance::has_saved(n.kind.text().unwrap(), Some(n.width), Some(n.height)));
+            let recorded = script.lock().unwrap();
+            let sent = &recorded.hosted.last().unwrap().doc;
+            assert!(Arc::ptr_eq(&ds.doc, sent), "the local tab and peers must retain the same captured document");
+        }
+    }
+}
+
 pub(crate) fn push(script: &Arc<Mutex<Script>>, events: Vec<Event>) {
     script.lock().unwrap().events.extend(events);
 }

@@ -63,7 +63,10 @@ pub fn show(app: &mut FigApp, ctx: &egui::Context) {
     // Joined server documents bypass file.open; check them once their tab is live.
     if let Ok(ds) = app.session.ds() {
         let uid = ds.uid;
-        if app.session.live().status == figcraft_engine::live::Status::Live && app.ui.font_checked.insert(uid) {
+        if app.session.live().status == figcraft_engine::live::Status::Live
+            && app.session.live().info.as_ref().is_some_and(|info| info.role == figcraft_engine::live::Role::Guest)
+            && app.ui.font_checked.insert(uid)
+        {
             app.ui.font_checks.push(uid);
         }
     }

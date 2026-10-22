@@ -34,6 +34,12 @@ pub fn fonts_available(t: &TextData) -> bool {
 fn fingerprint(t: &TextData, w: Option<f64>, h: Option<f64>) -> Option<String> {
     let mut source = t.clone();
     source.appearance = None;
+    source.style.style_id = None;
+    source.style.link = None;
+    for run in &mut source.runs {
+        run.style.style_id = None;
+        run.style.link = None;
+    }
     let (w, h) = if t.path.is_some() {
         (None, None)
     } else {
@@ -272,6 +278,26 @@ mod tests {
         };
         t.appearance = Some(Box::new(a));
         t
+    }
+
+    #[test]
+    fn style_bindings_and_links_do_not_invalidate_saved_geometry() {
+        let mut t = synthetic();
+        t.auto_resize = TextAutoResize::None;
+        t.runs.push(figcraft_doc::StyleRun { start: 0, end: 1, style: t.style.clone() });
+        t.appearance.as_mut().unwrap().fingerprint = fingerprint(&t, Some(80.0), Some(40.0)).unwrap();
+        t.style.style_id = Some("shared-style".into());
+        t.style.link = Some("https://example.org/base".into());
+        t.runs[0].style.style_id = Some("run-style".into());
+        t.runs[0].style.link = Some("https://example.org/run".into());
+        assert!(restore(&t, Some(80.0), Some(40.0)).is_some());
+        let mut changed = t.clone();
+        changed.style.font_size += 1.0;
+        assert!(!has_saved(&changed, Some(80.0), Some(40.0)));
+        let mut changed = t.clone();
+        changed.runs[0].style.fills = Some(vec![]);
+        assert!(!has_saved(&changed, Some(80.0), Some(40.0)));
+        assert!(!has_saved(&t, Some(160.0), Some(40.0)));
     }
 
     #[test]
