@@ -142,7 +142,10 @@ impl<S: Socket> Driver<S> {
                 };
             }
             // Single-threaded: the connection counts as welcomed below, before the engine polls.
-            Ok(m) => take(m, &self.cfg, &self.inbox, &mut c.seen, &self.resume, &|| {}),
+            Ok(m) => match crate::assets_wire::validate_legacy(&m) {
+                Ok(()) => take(m, &self.cfg, &self.inbox, &mut c.seen, &self.resume, &|| {}),
+                Err(reason) => Taken::End(Outcome::Refused(reason)),
+            },
             Err(e) => Taken::End(Outcome::Refused(format!("the host sent a message this version can't read ({e})"))),
         };
         match taken {
@@ -265,7 +268,7 @@ impl<S: Socket> Driver<S> {
         if let Some(c) = self.conn.as_mut() {
             c.last_sent = now;
         }
-        message::encode(msg).is_ok_and(|b| crate::transfer::packets(&b, self.sock.chunked()).all(|p| self.sock.send(&p)))
+        crate::assets_wire::client(msg, false).is_ok_and(|b| crate::transfer::packets(&b, self.sock.chunked()).all(|p| self.sock.send(&p)))
     }
 
     /// The connection ended: close it, then stop or plan the reconnect.

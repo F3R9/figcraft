@@ -211,7 +211,7 @@ fn close(mut ws: Ws) {
 }
 
 fn send(ws: &mut Ws, msg: &ClientMsg) -> Result<(), String> {
-    let bytes = message::encode(msg).map_err(|e| e.to_string())?;
+    let bytes = crate::assets_wire::client(msg, ws.get_ref().assets)?;
     crate::net::send_binary(ws, &bytes).map_err(|e| format!("the connection to the server dropped ({e})"))
 }
 
