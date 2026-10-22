@@ -838,7 +838,13 @@ fn next_message(ws: &mut WebSocket<Duplex>, max: usize) -> Result<Option<(Client
     loop {
         return match ws.read() {
             Ok(Message::Binary(b)) => {
-                let Some(b) = transfer.push(&b, ws.get_ref().chunked, max)? else { continue };
+                let Some(b) = transfer.push(&b, ws.get_ref().chunked, max).map_err(|error| match error {
+                    crate::transfer::Error::TooLarge => too_large(max),
+                    crate::transfer::Error::Invalid(reason) => reason,
+                })?
+                else {
+                    continue;
+                };
                 // Whole now: it counts as in flight from here, no longer as being read.
                 ws.get_mut().read_done();
                 let msg = message::decode::<ClientMsg>(&b, max).map_err(|_| "that message couldn't be read".to_string())?;

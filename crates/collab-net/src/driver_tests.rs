@@ -153,6 +153,47 @@ fn browser_driver_only_exposes_a_complete_verified_large_welcome() {
 }
 
 #[test]
+fn browser_accepts_framing_overhead_at_the_logical_receive_limit() {
+    let now = Instant::now();
+    let inbox = Inbox::new(Arc::new(|| {}));
+    let bytes = encode(&ServerMsg::Refused { reason: "R".repeat(crate::transfer::CHUNK) });
+    let chunks: Vec<_> = crate::transfer::packets(&bytes, true).collect();
+    assert_eq!(chunks.len(), 2);
+    assert!(chunks[0].len() > bytes.len());
+    let mut cfg = GuestConfig::new(invite(), "Ada".into());
+    cfg.limits.max_server_message = bytes.len();
+    let mut d = Driver::start(ChunkSocket::default(), cfg, inbox.clone(), now);
+    d.opened(now);
+    inbox.drain();
+    d.message(&chunks[0], now);
+    assert!(inbox.drain().is_empty());
+    d.message(&chunks[1], now);
+    assert!(inbox.drain().iter().any(|e| matches!(e,
+        Event::Status(Status::Failed { reason }) if reason.starts_with("The host refused: ")
+    )));
+    assert!(d.done());
+}
+
+#[test]
+fn chunked_and_legacy_receive_limits_keep_the_local_budget_diagnostic() {
+    for chunked in [false, true] {
+        let now = Instant::now();
+        let inbox = Inbox::new(Arc::new(|| {}));
+        let mut cfg = GuestConfig::new(invite(), "Ada".into());
+        cfg.limits.max_server_message = crate::transfer::CHUNK + 128;
+        let mut d = Driver::start(ChunkSocket::default(), cfg, inbox.clone(), now);
+        d.opened(now);
+        inbox.drain();
+        let source = vec![1; crate::transfer::CHUNK * 3];
+        let first = crate::transfer::packets(&source, chunked).next().unwrap();
+        d.message(&first, now);
+        let expected = TOO_LARGE_TO_JOIN.replace("{mb}", "1");
+        assert!(inbox.drain().iter().any(|e| matches!(e, Event::Status(Status::Failed { reason }) if reason == &expected)));
+        assert!(d.done());
+    }
+}
+
+#[test]
 fn browser_handshake_falls_back_once_but_never_replays_an_open_connection() {
     let now = Instant::now();
     let inbox = Inbox::new(Arc::new(|| {}));

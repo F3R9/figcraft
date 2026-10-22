@@ -1103,3 +1103,19 @@ Uploads are retained under the receiving session scope before their manifests re
 reconnecting download requests fail promptly instead of keeping save waiters pending.
 
 Peers that did not negotiate the resource extension cannot introduce typed image manifests or JSON image entries containing cache references. Native and browser receive paths reject them before accepting a welcome or applying changes; legacy inline images remain supported.
+
+Receive-budget failures are distinct from invalid framing. A declared total above the local
+budget (or an oversized legacy message) keeps the existing local MiB-limit diagnostic in native
+and browser joins and management replies, rather than reporting a host refusal. Zero totals,
+out-of-order offsets and payloads beyond their declared total remain malformed-frame refusals.
+The receiving-budget opt-in described above remains explicit; this does not raise any limit.
+
+Native WebSocket caps and the browser's raw packet check allow the 49-byte transfer header
+above the logical receive budget. Reassembly and message decoding still enforce the exact
+configured budget, including legacy messages. Socket and browser regressions cover a payload
+just above one chunk whose first framed packet exceeds that budget.
+
+Reassembly grows its buffer only when the incoming payload exceeds spare capacity. Exact
+reservation requests retain geometric growth while staying within the declared total; they do
+not deliberately double a nearly complete transfer beyond its receive budget. This bounds
+requested vector capacity, not allocator overhead or decoding memory.

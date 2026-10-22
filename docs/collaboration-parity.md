@@ -29,6 +29,8 @@ Native large-document work: negotiated binary uploads and deferred image downloa
 | Date | Change | Summary |
 |---|---|---|
 | 2026-10-22 | minor | Scoped immutable original-image references and authorized binary downloads; exact originals remain authoritative for saves/exports. Recovery authority and cache/request regressions covered. No previews. Readiness estimates unchanged. |
+
+| 2026-10-22 | minor | Distinguish receive-budget failures from malformed transfer frames: native/browser joins and management replies keep the local MiB-limit diagnostic. Wire format and readiness estimates unchanged. |
 | 2026-10-22 | minor | Negotiated bounded chunk transport with checksummed reassembly, legacy fallback and configurable receive budgets; inline images retained. Readiness estimates unchanged. |
 | 2026-10-20 | minor | M9: native binary uploads and on-demand downloads, scoped bounded cache, self-contained Save, reference-only recovery, image authorization across server restarts and legacy wire fallback. Cold-process large-document validation retained two pages, 16,626 nodes and 759 image references; guest peak private memory 891.2 MiB at opening/one download. Browser deferred images, streaming server import and permanent historical assets remain open. Readiness unchanged. |
 | 2026-10-20 | minor | M9: optional chunked WebSocket transport with checksum, bounded reassembly, legacy compatibility and an explicit native receive budget. Synthetic socket tests cover 65 MiB; full-size persistent-server validation, transfer progress, byte-offset resume and lazy assets remain unimplemented. Readiness and estimates unchanged. |

@@ -19,6 +19,44 @@ use crate::transfer::{CHUNK, Receiver};
 
 const TOKEN: &str = "SyntheticTransferSecret";
 
+#[test]
+fn framing_fits_a_tight_websocket_budget_without_relaxing_the_logical_limit() {
+    use std::net::{TcpListener, TcpStream};
+    use tungstenite::protocol::{Role, WebSocket};
+
+    let payload = vec![7; CHUNK + 1];
+    let packets: Vec<_> = crate::transfer::packets(&payload, true).collect();
+    assert_eq!(packets.len(), 2);
+    assert!(packets[0].len() > payload.len());
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let sender = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut ws = WebSocket::from_raw_socket(stream, Role::Server, None);
+        for packet in packets {
+            ws.send(Message::Binary(packet.into())).unwrap();
+        }
+    });
+    let stream = TcpStream::connect(addr).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut ws = WebSocket::from_raw_socket(stream, Role::Client, Some(crate::net::config(payload.len())));
+    let mut receiver = Receiver::default();
+    for i in 0..2 {
+        let Message::Binary(packet) = ws.read().unwrap() else { panic!("expected a chunk") };
+        if i == 0 {
+            assert_eq!(Receiver::default().push(&packet, true, CHUNK), Err(crate::transfer::Error::TooLarge));
+        }
+        let complete = receiver.push(&packet, true, payload.len()).unwrap();
+        if i == 0 {
+            assert!(complete.is_none());
+        } else {
+            assert_eq!(complete.unwrap(), payload);
+        }
+    }
+    sender.join().unwrap();
+}
+
 fn host() -> std::io::Result<(Host, Invite, String)> {
     host_with_name("Synthetic document / ".repeat(80_000))
 }
@@ -149,6 +187,20 @@ fn native_guest_receives_the_complete_large_document() {
         })
         .unwrap();
     assert_eq!(Client::join(welcome).unwrap().document().name, name);
+}
+
+#[test]
+fn a_chunked_welcome_above_the_budget_is_a_local_size_failure_not_a_host_refusal() {
+    let (_host, invite, _) = host().unwrap();
+    let mut cfg = GuestConfig::new(invite, "Budget test".into());
+    cfg.limits.max_server_message = CHUNK + 128;
+    let expected = figcraft_engine::live::TOO_LARGE_TO_JOIN.replace("{mb}", "1");
+    let mut probe = Probe::new();
+    let _guest = Guest::start(cfg, probe.inbox.clone()).unwrap();
+    probe.wait("local receive-budget failure", |events| {
+        events.iter().any(|e| matches!(e, Event::Status(figcraft_engine::live::Status::Failed { reason }) if reason == &expected))
+    });
+    assert!(!probe.events.iter().any(|e| matches!(e, Event::Sync(ServerMsg::Welcome { .. }))));
 }
 
 #[test]
