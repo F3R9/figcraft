@@ -1036,3 +1036,8 @@ Native WebSocket caps and the browser's raw packet check allow the 49-byte trans
 above the logical receive budget. Reassembly and message decoding still enforce the exact
 configured budget, including legacy messages. Socket and browser regressions cover a payload
 just above one chunk whose first framed packet exceeds that budget.
+
+Reassembly grows its buffer only when the incoming payload exceeds spare capacity. Exact
+reservation requests retain geometric growth while staying within the declared total; they do
+not deliberately double a nearly complete transfer beyond its receive budget. This bounds
+requested vector capacity, not allocator overhead or decoding memory.

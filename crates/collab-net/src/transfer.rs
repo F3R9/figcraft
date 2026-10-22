@@ -114,7 +114,11 @@ impl Receiver {
         }
         self.total = Some(total);
         self.hash = hash;
-        self.bytes.try_reserve(payload.len()).map_err(|_| "not enough memory for the collaboration transfer")?;
+        if self.bytes.capacity() - self.bytes.len() < payload.len() {
+            // Retain geometric growth without requesting capacity beyond the declared total.
+            let grow = self.bytes.len().max(payload.len()).min(total - self.bytes.len());
+            self.bytes.try_reserve_exact(grow).map_err(|_| "not enough memory for the collaboration transfer")?;
+        }
         self.bytes.extend_from_slice(payload);
         self.digest.update(payload);
         if self.bytes.len() != total {
@@ -132,6 +136,28 @@ impl Receiver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reassembly_growth_stays_within_the_total_and_reuses_spare_capacity() {
+        let source = vec![37; CHUNK * 8 + 1];
+        let mut rx = Receiver::default();
+        let mut allocations = 0;
+        for packet in packets(&source, true) {
+            let (len, capacity) = (rx.bytes.len(), rx.bytes.capacity());
+            let payload_len = packet.len() - HEADER;
+            let complete = rx.push(&packet, true, source.len()).unwrap();
+            let current_capacity = complete.as_ref().map_or(rx.bytes.capacity(), Vec::capacity);
+            assert!(current_capacity <= source.len());
+            if capacity - len >= payload_len {
+                assert_eq!(current_capacity, capacity, "reuse space already allocated");
+            }
+            allocations += usize::from(current_capacity != capacity);
+            if let Some(bytes) = complete {
+                assert_eq!(bytes, source);
+            }
+        }
+        assert!(allocations <= 5, "bounded geometric growth, not a reallocation per chunk");
+    }
 
     #[test]
     fn large_message_is_atomic_and_every_piece_is_bounded() {
