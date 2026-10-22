@@ -224,7 +224,13 @@ fn reply<T>(ws: &mut Ws, limits: &NetLimits, pick: impl Fn(ServerMsg) -> Option<
     loop {
         return match ws.read() {
             Ok(Message::Binary(b)) => {
-                let Some(b) = transfer.push(&b, ws.get_ref().chunked, limits.max_server_message)? else { continue };
+                let Some(b) = transfer.push(&b, ws.get_ref().chunked, limits.max_server_message).map_err(|error| match error {
+                    crate::transfer::Error::TooLarge => crate::join::receive_limit_reason(limits),
+                    crate::transfer::Error::Invalid(reason) => reason,
+                })?
+                else {
+                    continue;
+                };
                 match message::decode::<ServerMsg>(&b, limits.max_server_message) {
                     Ok(ServerMsg::Refused { reason }) => Err(format!("{REFUSED}{reason}")),
                     Ok(ServerMsg::Pong) => continue,
@@ -238,6 +244,7 @@ fn reply<T>(ws: &mut Ws, limits: &NetLimits, pick: impl Fn(ServerMsg) -> Option<
             }),
             Ok(Message::Text(_)) => Err("the server sent a text message".into()),
             Ok(_) => continue,
+            Err(tungstenite::Error::Capacity(_)) => Err(crate::join::receive_limit_reason(limits)),
             Err(e) => Err(format!("no answer from the server ({e})")),
         };
     }

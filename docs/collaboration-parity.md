@@ -26,6 +26,7 @@ cursors, selections, text carets, cursor chat and spotlights shown live ([`colla
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | Distinguish receive-budget failures from malformed transfer frames: native/browser joins and management replies keep the local MiB-limit diagnostic. Wire format and readiness estimates unchanged. |
 | 2026-10-22 | minor | Negotiated bounded chunk transport with checksummed reassembly, legacy fallback and configurable receive budgets; inline images retained. Readiness estimates unchanged. |
 | 2026-10-20 | minor | M9: optional chunked WebSocket transport with checksum, bounded reassembly, legacy compatibility and an explicit native receive budget. Synthetic socket tests cover 65 MiB; full-size persistent-server validation, transfer progress, byte-offset resume and lazy assets remain unimplemented. Readiness and estimates unchanged. |
 | 2026-10-17 | minor | From community batch #735: server message limits follow `max_file_mb`, so files above 64 MiB publish and open, the client takes at most 1 GiB and the server warns about large limits with open publishing (#705); a damaged generation field no longer drops a log's flushed edits (#687); the web build joins a session from a `#join=` link in its URL (#712, unit-tested and built for wasm, not run in a browser). Percentages and hours unchanged |

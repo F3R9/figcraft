@@ -153,6 +153,25 @@ fn browser_driver_only_exposes_a_complete_verified_large_welcome() {
 }
 
 #[test]
+fn chunked_and_legacy_receive_limits_keep_the_local_budget_diagnostic() {
+    for chunked in [false, true] {
+        let now = Instant::now();
+        let inbox = Inbox::new(Arc::new(|| {}));
+        let mut cfg = GuestConfig::new(invite(), "Ada".into());
+        cfg.limits.max_server_message = crate::transfer::CHUNK + 128;
+        let mut d = Driver::start(ChunkSocket::default(), cfg, inbox.clone(), now);
+        d.opened(now);
+        inbox.drain();
+        let source = vec![1; crate::transfer::CHUNK * 3];
+        let first = crate::transfer::packets(&source, chunked).next().unwrap();
+        d.message(&first, now);
+        let expected = TOO_LARGE_TO_JOIN.replace("{mb}", "1");
+        assert!(inbox.drain().iter().any(|e| matches!(e, Event::Status(Status::Failed { reason }) if reason == &expected)));
+        assert!(d.done());
+    }
+}
+
+#[test]
 fn browser_handshake_falls_back_once_but_never_replays_an_open_connection() {
     let now = Instant::now();
     let inbox = Inbox::new(Arc::new(|| {}));

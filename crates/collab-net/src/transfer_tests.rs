@@ -152,6 +152,20 @@ fn native_guest_receives_the_complete_large_document() {
 }
 
 #[test]
+fn a_chunked_welcome_above_the_budget_is_a_local_size_failure_not_a_host_refusal() {
+    let (_host, invite, _) = host().unwrap();
+    let mut cfg = GuestConfig::new(invite, "Budget test".into());
+    cfg.limits.max_server_message = CHUNK + 128;
+    let expected = figcraft_engine::live::TOO_LARGE_TO_JOIN.replace("{mb}", "1");
+    let mut probe = Probe::new();
+    let _guest = Guest::start(cfg, probe.inbox.clone()).unwrap();
+    probe.wait("local receive-budget failure", |events| {
+        events.iter().any(|e| matches!(e, Event::Status(figcraft_engine::live::Status::Failed { reason }) if reason == &expected))
+    });
+    assert!(!probe.events.iter().any(|e| matches!(e, Event::Sync(ServerMsg::Welcome { .. }))));
+}
+
+#[test]
 fn legacy_client_is_not_sent_chunk_envelopes() {
     let (_host, invite, _) = host().unwrap();
     let stream = std::net::TcpStream::connect(&invite.server.host).unwrap();

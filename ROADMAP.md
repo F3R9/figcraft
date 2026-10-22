@@ -316,6 +316,7 @@ Ranked; detail and milestones in [`docs/roadmap.md`](docs/roadmap.md).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | Distinguish receive-budget failures from malformed transfer frames: native/browser joins and management replies keep the local MiB-limit diagnostic. Wire format and readiness estimates unchanged. |
 | 2026-10-22 | minor | Negotiated bounded chunk transport with checksummed reassembly, legacy fallback and configurable receive budgets; inline images retained. Readiness estimates unchanged. |
 | 2026-10-22 | minor | Startup graphics-error tests assert translated hints rather than English substrings, so desktop recovery tests selecting a different UI language do not make them fail. Runtime behavior and readiness estimates unchanged. |
 | 2026-10-20 | minor | A document dropped on the canvas opens (#916): a `.figcraft`, `.fig` or file JSON dropped on the canvas opens as a file of its own, as on the home screen, in the browser too; it used to add its pages to the file in front. Images and SVG still import at the drop point, File ▸ Import still adds pages, and dragging only documents over the canvas says "Drop to open" (not in the browser, which names no file until the drop). Numbers unchanged |

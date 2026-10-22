@@ -1025,3 +1025,9 @@ chooses to share on the network; the default is the invite link with a random to
    join codes (online through the server, or carrying the host's address on the local network)
    and by your online files (the app remembers what it owns and opens it again as its owner).
 6. **Accounts**: people signing in, per-person permissions, teams and projects.
+
+Receive-budget failures are distinct from invalid framing. A declared total above the local
+budget (or an oversized legacy message) keeps the existing local MiB-limit diagnostic in native
+and browser joins and management replies, rather than reporting a host refusal. Zero totals,
+out-of-order offsets and payloads beyond their declared total remain malformed-frame refusals.
+The receiving-budget opt-in described above remains explicit; this does not raise any limit.

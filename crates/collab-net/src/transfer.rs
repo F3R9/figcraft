@@ -8,6 +8,29 @@ pub(crate) const CHUNK: usize = 1 << 20;
 const HEADER: usize = 49;
 const VERSION: u8 = 2;
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Error {
+    TooLarge,
+    Invalid(String),
+}
+
+impl From<&str> for Error {
+    fn from(reason: &str) -> Self {
+        Self::Invalid(reason.to_string())
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooLarge => f.write_str("the collaboration message exceeds the receiving limit"),
+            Self::Invalid(reason) => f.write_str(reason),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
 /// Legacy peers keep wire version 1. Only a negotiated connection sends version 2 pieces.
 pub(crate) fn packets(bytes: &[u8], chunked: bool) -> Packets<'_> {
     let chunked = chunked && bytes.len() > CHUNK;
@@ -56,13 +79,13 @@ pub(crate) struct Receiver {
 impl Receiver {
     /// No allocation follows an untrusted size declaration. Storage grows only with bytes
     /// actually received, inside `max`; partial messages belong to this connection only.
-    pub(crate) fn push(&mut self, bytes: &[u8], negotiated: bool, max: usize) -> Result<Option<Vec<u8>>, String> {
+    pub(crate) fn push(&mut self, bytes: &[u8], negotiated: bool, max: usize) -> Result<Option<Vec<u8>>, Error> {
         if bytes.first() != Some(&VERSION) {
             if self.total.is_some() {
                 return Err("a collaboration transfer was interrupted by another message".into());
             }
             if bytes.len() > max {
-                return Err("the collaboration message exceeds the receiving limit".into());
+                return Err(Error::TooLarge);
             }
             return Ok(Some(bytes.to_vec()));
         }
@@ -72,16 +95,19 @@ impl Receiver {
         if bytes.len() <= HEADER || bytes.len() > HEADER + CHUNK {
             return Err("invalid collaboration chunk length".into());
         }
-        let number = |range: std::ops::Range<usize>| -> Result<usize, String> {
+        let number = |range: std::ops::Range<usize>| -> Result<u64, Error> {
             let array: [u8; 8] = bytes.get(range).and_then(|v| v.try_into().ok()).ok_or("invalid chunk header")?;
-            usize::try_from(u64::from_le_bytes(array)).map_err(|_| "chunk length does not fit this platform".into())
+            Ok(u64::from_le_bytes(array))
         };
-        let total = number(1..9)?;
-        let offset = number(9..17)?;
+        let total = usize::try_from(number(1..9)?).map_err(|_| Error::TooLarge)?;
+        if total > max {
+            return Err(Error::TooLarge);
+        }
+        let offset = usize::try_from(number(9..17)?).map_err(|_| Error::from("chunk offset does not fit this platform"))?;
         let hash: [u8; 32] = bytes.get(17..HEADER).and_then(|v| v.try_into().ok()).ok_or("invalid chunk checksum")?;
         let payload = bytes.get(HEADER..).ok_or("invalid chunk payload")?;
-        if total == 0 || total > max || offset != self.bytes.len() || payload.len() > total.saturating_sub(offset) {
-            return Err("collaboration chunk is out of order or exceeds the receiving limit".into());
+        if total == 0 || offset != self.bytes.len() || payload.len() > total.saturating_sub(offset) {
+            return Err("collaboration chunk is out of order".into());
         }
         if self.total.is_some_and(|n| n != total) || (self.total.is_some() && self.hash != hash) {
             return Err("collaboration transfer metadata changed".into());
@@ -132,6 +158,26 @@ mod tests {
             assert_eq!(p, vec![bytes.clone()]);
             assert_eq!(Receiver::default().push(&p[0], false, bytes.len()).unwrap(), Some(bytes));
         }
+    }
+
+    #[test]
+    fn receive_budget_errors_are_distinct_from_invalid_frames() {
+        let source = vec![1; CHUNK + 1];
+        let p: Vec<_> = packets(&source, true).collect();
+        let mut rx = Receiver::default();
+        assert_eq!(rx.push(&p[0], true, CHUNK), Err(Error::TooLarge));
+        assert!(rx.bytes.is_empty());
+        assert_eq!(Receiver::default().push(&source, false, CHUNK), Err(Error::TooLarge));
+        assert!(matches!(Receiver::default().push(&p[1], true, source.len()), Err(Error::Invalid(_))));
+        let mut zero = p[0].clone();
+        zero[1..9].copy_from_slice(&0u64.to_le_bytes());
+        assert!(matches!(Receiver::default().push(&zero, true, source.len()), Err(Error::Invalid(_))));
+        let mut short = p[0].clone();
+        short[1..9].copy_from_slice(&1u64.to_le_bytes());
+        assert!(matches!(Receiver::default().push(&short, true, source.len()), Err(Error::Invalid(_))));
+        let mut huge = p[0].clone();
+        huge[1..9].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(Receiver::default().push(&huge, true, CHUNK), Err(Error::TooLarge));
     }
 
     #[test]
