@@ -121,7 +121,7 @@ impl<S: Socket> Driver<S> {
     /// A binary message from the host.
     pub(crate) fn message(&mut self, bytes: &[u8], now: Instant) {
         let Some(c) = self.conn.as_mut() else { return };
-        if bytes.len() > self.cfg.limits.max_server_message {
+        if bytes.len() > self.cfg.limits.max_server_message.saturating_add(crate::transfer::HEADER) {
             return self.end(too_large(&self.cfg.limits), now);
         }
         c.last_heard = now;

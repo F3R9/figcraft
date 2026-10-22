@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 
 pub(crate) const PROTOCOL: &str = "figcraft.chunks.v1";
 pub(crate) const CHUNK: usize = 1 << 20;
-const HEADER: usize = 49;
+pub(crate) const HEADER: usize = 49;
 const VERSION: u8 = 2;
 
 #[derive(Debug, PartialEq, Eq)]

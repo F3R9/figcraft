@@ -1031,3 +1031,8 @@ budget (or an oversized legacy message) keeps the existing local MiB-limit diagn
 and browser joins and management replies, rather than reporting a host refusal. Zero totals,
 out-of-order offsets and payloads beyond their declared total remain malformed-frame refusals.
 The receiving-budget opt-in described above remains explicit; this does not raise any limit.
+
+Native WebSocket caps and the browser's raw packet check allow the 49-byte transfer header
+above the logical receive budget. Reassembly and message decoding still enforce the exact
+configured budget, including legacy messages. Socket and browser regressions cover a payload
+just above one chunk whose first framed packet exceeds that budget.
