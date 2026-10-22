@@ -1608,17 +1608,12 @@ fn host(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(s.live_summary())
 }
 
-/// Keep captured text geometry in the local host tab as well as the document sent to peers.
-/// This metadata must neither dirty a clean tab nor mark existing edits as saved.
-fn document_for_sharing(s: &mut Session) -> Result<(Arc<Document>, u64)> {
-    let ds = s.ds_mut()?;
-    let was_dirty = ds.is_dirty();
+/// Prepare the host snapshot without changing the local tab; adopt it only after hosting succeeds.
+fn document_for_sharing(s: &Session) -> Result<(Arc<Document>, u64)> {
+    let ds = s.ds()?;
     let mut doc = (*ds.doc).clone();
     if figcraft_text::appearance::capture(&mut doc, None) > 0 {
-        ds.doc = Arc::new(doc);
-        if !was_dirty {
-            ds.mark_saved();
-        }
+        return Ok((Arc::new(doc), ds.uid));
     }
     Ok((ds.doc.clone(), ds.uid))
 }
@@ -1637,8 +1632,18 @@ fn start_host(s: &mut Session, cmd: &str, p: &Value, bind: Bind, short: bool) ->
         Some(other) => other.parse::<IpAddr>().map(Bind::Addr).map_err(|_| bad(cmd, "`bind` must be \"local\", \"lan\" or an IP address"))?,
     };
     let (doc, uid) = document_for_sharing(s)?;
-    let opts = HostOptions { port, bind, name: display_name(&s.prefs), doc, short };
+    let opts = HostOptions { port, bind, name: display_name(&s.prefs), doc: doc.clone(), short };
     let (id, info) = s.live.start(cmd, |l, id| l.host(id, opts).map_err(|e| EngineError::Other(format!("couldn't start the live session: {e}"))))?;
+    // A failed host start must leave both the document and its saved baseline untouched.
+    if let Some(ds) = s.docs.iter_mut().find(|d| d.uid == uid)
+        && !Arc::ptr_eq(&ds.doc, &doc)
+    {
+        let was_dirty = ds.is_dirty();
+        ds.doc = doc;
+        if !was_dirty {
+            ds.mark_saved();
+        }
+    }
     s.live.open(Live { id, status: Status::Live, info: Some(info), doc_uid: Some(uid), tab: Some(uid), ..Live::default() });
     Ok(id)
 }

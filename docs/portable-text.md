@@ -47,3 +47,8 @@ text editing and moving a layer. The synthetic face exists only in the author's 
 its font bytes nor private artwork are stored in test fixtures.
 Review regressions also cover late font indexing before hosting/local sharing, clean and dirty
 tabs, non-geometric style metadata, and the host's missing-font check queue.
+
+Hosting prepares the captured snapshot before starting the link, and adopts it locally only
+after startup succeeds. A rejected host/local-share start leaves both the local document and
+its saved baseline untouched. Regressions cover successful and rejected starts with late font
+indexing for clean and dirty tabs.
