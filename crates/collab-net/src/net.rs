@@ -20,9 +20,10 @@ use tungstenite::protocol::WebSocketConfig;
 use crate::invite::Endpoint;
 use crate::tls::{self, Tls};
 
-/// tungstenite's settings for messages up to `max` bytes.
+/// Allow framing overhead on the wire; the receiver still enforces the logical `max`.
 pub fn config(max: usize) -> WebSocketConfig {
-    WebSocketConfig::default().max_message_size(Some(max)).max_frame_size(Some(max))
+    let packet_max = max.saturating_add(crate::transfer::HEADER);
+    WebSocketConfig::default().max_message_size(Some(packet_max)).max_frame_size(Some(packet_max))
 }
 
 /// Request the optional chunked transport without changing the collaboration protocol.

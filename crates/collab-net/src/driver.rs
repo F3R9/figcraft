@@ -121,14 +121,15 @@ impl<S: Socket> Driver<S> {
     /// A binary message from the host.
     pub(crate) fn message(&mut self, bytes: &[u8], now: Instant) {
         let Some(c) = self.conn.as_mut() else { return };
-        if bytes.len() > self.cfg.limits.max_server_message {
+        if bytes.len() > self.cfg.limits.max_server_message.saturating_add(crate::transfer::HEADER) {
             return self.end(too_large(&self.cfg.limits), now);
         }
         c.last_heard = now;
         let bytes = match c.transfer.push(bytes, self.sock.chunked(), self.cfg.limits.max_server_message) {
             Ok(Some(b)) => b,
             Ok(None) => return,
-            Err(e) => return self.end(Outcome::Refused(e), now),
+            Err(crate::transfer::Error::TooLarge) => return self.end(too_large(&self.cfg.limits), now),
+            Err(crate::transfer::Error::Invalid(reason)) => return self.end(Outcome::Refused(reason), now),
         };
         let taken = match message::decode::<ServerMsg>(&bytes, self.cfg.limits.max_server_message) {
             // The join code's answer: join the file it opens, on a new connection.

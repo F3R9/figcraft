@@ -510,7 +510,8 @@ fn read_loop(mut ws: WebSocket<Duplex>, ctx: &ReaderCtx) {
                 let b = match transfer.push(&b, ws.get_ref().chunked, ctx.cfg.limits.max_server_message) {
                     Ok(Some(b)) => b,
                     Ok(None) => continue,
-                    Err(e) => break Outcome::Refused(e),
+                    Err(crate::transfer::Error::TooLarge) => break too_large(&ctx.cfg.limits),
+                    Err(crate::transfer::Error::Invalid(reason)) => break Outcome::Refused(reason),
                 };
                 match message::decode::<ServerMsg>(&b, ctx.cfg.limits.max_server_message) {
                     Ok(mut m) => {
