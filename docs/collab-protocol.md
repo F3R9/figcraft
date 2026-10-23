@@ -1130,3 +1130,13 @@ Old peers keep the original download path. Two bounded, deduplicated generation 
 scoped 64 MiB caches keep this work outside the sync hub. The guest permits eight preview
 requests alongside the two original requests. [Image previews](image-previews.md) describes
 validation, budgets, view levels and the full-original save/export guarantees.
+
+## Portable text appearance (2026-10-20)
+
+Native text nodes can carry `appearance`: a fingerprint of editable text/style/box inputs,
+positioned vector glyph outlines, line metrics and styled decorations. These are document
+geometry, not font binaries. They travel in the existing node-kind property and normal snapshots,
+logs, saves, undo and redo. A receiving machine with absent faces uses the saved geometry and
+keeps the author's text box. SVG/PDF exports use those outlines too. See [portable-text.md](portable-text.md).
+Both server and clients must understand this optional field; older builds may discard it when
+reading or editing text. Upgrade a test server and its participating clients together.
