@@ -55,3 +55,11 @@ Native large-document work: negotiated binary uploads and deferred image downloa
 | 2026-10-11 | minor | Wording only: live sessions (#104), then the browser joining them and `figcraft://` invite links opening the desktop app; percentages and hours unchanged until the next re-measure |
 | 2026-10-10 | minor | Merged main after #101–#103: WASM plugins (plugins area 0% → 35% breadth, 20% ready; ecosystem 5% → 20%) and the multiplayer core without networking (multiplayer 5% → 15% breadth, 5% ready; collaboration 8% → 12%); menu breadth 97.5% → 98.5% (200/203); ready for real work ~46% → ~47%; full parity 420–790 h → 390–745 h; beta 210–380 h → 200–365 h. Fixed the stated weight sums (areas 1–16 sum to 94, total 113; percentages were already computed with those) |
 | 2026-10-10 | major | Created from the 2026-10-10 re-measure |
+
+## Server-backed close policy (local working build)
+
+A pathless guest tab confirmed by a persistent server (hosting metadata received) can close
+without a local-save prompt once its current document is synced and no batches are pending.
+Connecting/reconnecting sessions, edits held by gestures/previews, local file paths and local
+version/branch metadata retain the existing warning. Peer-hosted sessions do not claim durable
+server storage. The local saved baseline and explicit Save/Save As behavior are unchanged.

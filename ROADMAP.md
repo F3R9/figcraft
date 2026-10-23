@@ -316,6 +316,7 @@ Ranked; detail and milestones in [`docs/roadmap.md`](docs/roadmap.md).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-23 | minor | Closing a pathless persistent-server tab no longer asks for a local save after acknowledgement; pending/offline edits, local paths and unsaved local history remain protected. Shared close policy covers windows, tabs and file.close. |
 | 2026-10-23 | minor | Local working 0.10 integration: reviewed transport, original assets, progressive previews, portable text and server snapshot memory fix from 0f85c22. Public PR branches unchanged. |
 | 2026-10-23 | minor | Refresh display-sized previews on the 0.10.0 original-asset and reviewed transport branches; retain preview authorization, bounded workers, zoom resolution and exact-original saves. Readiness estimates unchanged. |
 | 2026-10-23 | minor | Refresh original-image downloads against main 0.10.0 and reviewed chunk transport; preserve exact originals, scoped authority and receive-budget diagnostics. Readiness estimates unchanged. |

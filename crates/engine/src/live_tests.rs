@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use figcraft_collab::message::{ClientMsg, ServerMsg};
+use figcraft_collab::message::{ClientMsg, HostInfo, ServerMsg};
 use figcraft_collab::{Client, Limits, Outgoing, Server};
 use figcraft_doc::{Document, NodeId};
 use serde_json::json;
@@ -212,6 +212,61 @@ pub(crate) fn relay(script: &Arc<Mutex<Script>>, server: &mut Server, from: u32)
         }
     }
     out
+}
+
+#[test]
+fn only_acknowledged_persistent_server_edits_skip_the_close_warning() {
+    let (mut s, script) = session();
+    s.execute("collab.join", &json!({"link":"figcraft://join?server=wss://example.invalid/collab/&file=f&token=t"})).unwrap();
+    let (mut server, me, welcome) = serve(s.doc().unwrap());
+    push(&script, vec![Event::Welcome { info: info(Role::Guest, me), peers: vec![] }, welcome]);
+    s.live_poll();
+    let uid = s.ds().unwrap().uid;
+    s.live_mut().unwrap().hosting = Some(HostInfo::default());
+    s.execute("shape.rectangle", &json!({"x":10,"y":20,"width":30,"height":40})).unwrap();
+    assert!(s.needs_save_on_close(uid), "an unsent edit needs protection");
+    s.live_sync();
+    assert!(s.live().client().unwrap().pending() > 0);
+    assert!(s.needs_save_on_close(uid), "sent is not acknowledged");
+    let answers = relay(&script, &mut server, me);
+    push(&script, answers);
+    s.live_poll();
+    s.live_sync();
+    assert_eq!(s.live().client().unwrap().pending(), 0);
+    assert!(s.ds().unwrap().is_dirty(), "the local Save baseline is unchanged");
+    assert!(!s.needs_save_on_close(uid), "the server already saved these edits");
+
+    s.live_mut().unwrap().hosting = None;
+    assert!(s.needs_save_on_close(uid), "an ephemeral host cannot promise persistence");
+    s.live_mut().unwrap().hosting = Some(HostInfo::default());
+    s.ds_mut().unwrap().path = Some("synthetic.figcraft".into());
+    assert!(s.needs_save_on_close(uid), "a local file still needs its own save");
+    s.ds_mut().unwrap().path = None;
+    s.live_mut().unwrap().status = Status::Reconnecting { attempt: 1 };
+    assert!(s.needs_save_on_close(uid), "a disconnected session is conservative");
+    s.live_mut().unwrap().status = Status::Live;
+    s.ds_mut().unwrap().versions_mut();
+    assert!(s.needs_save_on_close(uid), "local version history is not stored by document sync");
+}
+
+#[test]
+fn closing_a_confirmed_server_tab_needs_no_force_but_pending_edits_do() {
+    let (mut s, script) = session();
+    s.execute("collab.join", &json!({"link":"figcraft://join?server=wss://example.invalid/collab/&file=f&token=t"})).unwrap();
+    let (mut server, me, welcome) = serve(s.doc().unwrap());
+    push(&script, vec![Event::Welcome { info: info(Role::Guest, me), peers: vec![] }, welcome]);
+    s.live_poll();
+    s.live_mut().unwrap().hosting = Some(HostInfo::default());
+    s.execute("shape.rectangle", &json!({"x":10,"y":20,"width":30,"height":40})).unwrap();
+    assert!(s.execute("file.close", &json!({})).is_err());
+    s.live_sync();
+    let answers = relay(&script, &mut server, me);
+    push(&script, answers);
+    s.live_poll();
+    s.live_sync();
+    let uid = s.ds().unwrap().uid;
+    s.execute("file.close", &json!({})).unwrap();
+    assert!(!s.docs.iter().any(|d| d.uid == uid));
 }
 
 fn viewport(page: NodeId, x: f64, y: f64, w: f64, h: f64) -> Presence {

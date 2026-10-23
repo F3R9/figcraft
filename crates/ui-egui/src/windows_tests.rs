@@ -10,6 +10,41 @@ use serde_json::{Value, json};
 use crate::control::{ControlReply, ControlRequest};
 use crate::{FigApp, NoServices};
 
+#[test]
+fn server_acknowledged_changes_do_not_open_the_window_save_warning() {
+    use figcraft_engine::figcraft_collab::message::{ClientMsg, ServerMsg};
+    use figcraft_engine::figcraft_collab::{Client, Limits, Outgoing, Server};
+    use figcraft_engine::live::{Event as LiveEvent, HostInfo};
+
+    let (mut h, rect) = crate::live_tests::Harness::new();
+    h.app.session.ds_mut().unwrap().mark_saved();
+    let mut server = Server::new(h.app.session.doc().unwrap().clone(), "", Limits::default());
+    let ClientMsg::Hello(hello) = Client::hello("f", "", "Other", "") else { panic!("hello") };
+    let (other_id, welcome) = server.join(hello).unwrap();
+    let welcome = welcome.into_iter().find_map(|o| if let Outgoing::To(_, w @ ServerMsg::Welcome { .. }) = o { Some(w) } else { None }).unwrap();
+    let mut other = Client::join(welcome).unwrap();
+    let ClientMsg::Hello(hello) = Client::hello("f", "", "Me", "") else { panic!("hello") };
+    let (_, welcome) = server.join(hello).unwrap();
+    let welcome = welcome.into_iter().find_map(|o| if let Outgoing::To(_, w @ ServerMsg::Welcome { .. }) = o { Some(w) } else { None }).unwrap();
+    h.joined();
+    h.send(vec![LiveEvent::Sync(welcome)]);
+    h.frames(2);
+    h.app.session.live_mut().unwrap().hosting = Some(HostInfo::default());
+    let mut doc = other.document().clone();
+    doc.node_mut(rect).unwrap().opacity = 0.5;
+    let edit = other.edit(&doc).unwrap().unwrap();
+    let replies =
+        server.receive(other_id, edit).into_iter().filter_map(|o| if let Outgoing::All(m) = o { Some(LiveEvent::Sync(m)) } else { None }).collect();
+    h.send(replies);
+    h.frames(2);
+    assert!(h.app.session.ds().unwrap().is_dirty());
+    crate::windows::request_close(&mut h.app, &h.ctx);
+    assert!(!h.app.ui.confirm_close, "durable server edits do not ask for a local save");
+    h.app.session.live_mut().unwrap().hosting = None;
+    crate::windows::request_close(&mut h.app, &h.ctx);
+    assert!(h.app.ui.confirm_close, "a peer-hosted file still needs a local save");
+}
+
 /// One main-window frame, as the desktop app runs it; `close` asks the window to close.
 fn frame(ctx: &egui::Context, app: &mut FigApp, close: bool) {
     let mut input = RawInput::default();

@@ -850,6 +850,27 @@ fn busy(ds: &DocState) -> bool {
 }
 
 impl Session {
+    /// Whether closing this tab would discard local work. A pathless document acknowledged by
+    /// a persistent server needs no local Save; pending edits and local-only history still do.
+    pub fn needs_save_on_close(&self, uid: u64) -> bool {
+        let Some(ds) = self.docs.iter().find(|d| d.uid == uid) else { return false };
+        if ds.branch_of.is_some() || !ds.is_dirty() {
+            return false;
+        }
+        let live = self.live_of(uid);
+        let acknowledged = ds.path.is_none()
+            && !ds.versions_changed
+            && !busy(ds)
+            && live.status == Status::Live
+            && live.role() == Some(Role::Guest)
+            && live.hosting.is_some()
+            && live.hold == 0
+            && live.deferred.is_empty()
+            && live.client().is_some_and(|client| client.is_online() && client.pending() == 0)
+            && live.synced.as_ref().is_some_and(|doc| Arc::ptr_eq(doc, ds.document_itself()));
+        !acknowledged
+    }
+
     /// The active document (`None`: no document is open).
     fn tab(&self) -> Option<u64> {
         self.ds().ok().map(|d| d.uid)

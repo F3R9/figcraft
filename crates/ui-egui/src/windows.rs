@@ -137,7 +137,7 @@ impl FigApp {
 
     /// Files in this window with unsaved changes (a branch tab's edits live on in its file).
     fn unsaved(&self) -> Vec<String> {
-        self.session.docs.iter().filter(|d| self.shows(d.uid) && d.is_dirty() && d.branch_of.is_none()).map(|d| d.doc.name.clone()).collect()
+        self.session.docs.iter().filter(|d| self.shows(d.uid) && self.session.needs_save_on_close(d.uid)).map(|d| d.doc.name.clone()).collect()
     }
 }
 

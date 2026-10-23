@@ -375,7 +375,7 @@ pub fn tab_bar(app: &mut FigApp, ui: &mut Ui) {
         }
         if let Some(i) = close {
             // A branch tab's edits live on in its main file: closing it loses nothing.
-            let dirty = app.session.docs.get(i).is_some_and(|d| d.is_dirty() && d.branch_of.is_none());
+            let dirty = app.session.docs.get(i).is_some_and(|d| app.session.needs_save_on_close(d.uid));
             if dirty {
                 app.ui.find = None;
                 app.toast(trf(
