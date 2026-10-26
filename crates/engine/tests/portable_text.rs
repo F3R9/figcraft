@@ -101,7 +101,11 @@ fn portable_text_other_computer() {
     };
     let face =
         Face::from_bytes(FontBytes::Shared(std::sync::Arc::new(font.bytes.data().to_vec())), font.index, Some(FAMILY), Some("Regular")).unwrap();
+    let mut probe = TextData::new("Cache probe");
+    probe.style.font_family = FAMILY.into();
+    assert!(!figcraft_text::appearance::fonts_available(&probe));
     figcraft_text::db().write().unwrap().add(face);
+    assert!(figcraft_text::appearance::fonts_available(&probe), "adding a face invalidates the negative cache");
     let mut doc = Document::new("Synthetic portable text");
     let mut t = TextData::new("AV office — Привет\nSecond line");
     t.style.font_family = FAMILY.into();

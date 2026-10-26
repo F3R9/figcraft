@@ -105,7 +105,7 @@ pub(crate) fn tab_strip<T: Copy + PartialEq>(ui: &mut egui::Ui, t: &Tokens, tabs
             let active = *current == tab;
             let galley = ui.painter().layout_no_wrap(label.into(), semibold(11.0), if active { t.text } else { t.text_secondary });
             let (r, resp) = ui.allocate_exact_size(vec2(galley.size().x + 16.0, 24.0), Sense::click());
-            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, active, label));
+            resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, active, label));
             if active || resp.hovered() {
                 ui.painter().rect_filled(r, CornerRadius::same(5), t.hover);
             }
@@ -179,6 +179,10 @@ pub fn keys(app: &mut FigApp, ctx: &Context) {
     }
 }
 
+/// Draw the app's dialogs and cards: pending opens/imports/missing fonts, About,
+/// Preferences, shortcuts, find/replace, batch rename, menu input, variables, dev compare,
+/// branch, export preview, colour profile, plugin, live join/publish, online dialogs and
+/// close confirmation.
 pub fn show(app: &mut FigApp, ctx: &Context) {
     // Dropped files waiting to open: their card, then (once it has shown) the files.
     crate::pending_open::pending_opens(app, ctx);
@@ -246,7 +250,7 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label(tr("Your name in comments"));
-                if let Some(name) = crate::widgets::text_field(ui, egui::Id::new("pref_user_name"), &prefs.user_name, 160.0, tr("You")) {
+                if let Some(name) = crate::widgets::text_field(ui, egui::Id::unique("pref_user_name"), &prefs.user_name, 160.0, tr("You")) {
                     app.run("pref.userName", json!({"name": name}));
                 }
             });
@@ -256,7 +260,7 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
                 // Where Share ▸ Online keeps files and join codes are asked; no key here
                 // (preferences are saved as text).
                 let name = tr("Server for online sharing");
-                if let Some(url) = crate::widgets::text_field_named(ui, egui::Id::new("pref_publish_server"), &prefs.publish_server, 220.0, name) {
+                if let Some(url) = crate::widgets::text_field_named(ui, egui::Id::unique("pref_publish_server"), &prefs.publish_server, 220.0, name) {
                     app.run("pref.publishServer", json!({"url": url}));
                 }
                 let usual = prefs.publish_server == figcraft_engine::live::DEFAULT_SERVER;
@@ -329,7 +333,7 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
         let mut open = true;
         let mut action = None;
         egui::Window::new(tr("Find and replace"))
-            .id(egui::Id::new("Find and replace"))
+            .id(egui::Id::unique("Find and replace"))
             .open(&mut open)
             .anchor(Align2::LEFT_TOP, vec2(260.0, 120.0))
             .resizable(false)
@@ -396,7 +400,7 @@ fn menu_input_dialog(app: &mut FigApp, ctx: &Context) {
         match &mut input {
             MenuInput::Link(url) => {
                 ui.horizontal(|ui| {
-                    let field = crate::widgets::text_input(ui, egui::Id::new("menu_input_link"), url, 250.0, "https://");
+                    let field = crate::widgets::text_input(ui, egui::Id::unique("menu_input_link"), url, 250.0, "https://");
                     let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     let ok = !url.trim().is_empty();
                     if (crate::widgets::button(ui, tr("Done"), true, ok).clicked() || enter) && ok {
@@ -406,7 +410,7 @@ fn menu_input_dialog(app: &mut FigApp, ctx: &Context) {
             }
             MenuInput::Offset(offset) => {
                 ui.horizontal(|ui| {
-                    let id = egui::Id::new("menu_input_offset");
+                    let id = egui::Id::unique("menu_input_offset");
                     if let Some(crate::widgets::FieldEdit::Set(v) | crate::widgets::FieldEdit::Scrub(v, _)) =
                         crate::widgets::number_field(ui, id, crate::widgets::Lead::None, Some(*offset), "", 120.0, 1.0)
                     {
@@ -498,11 +502,41 @@ fn interface_size(app: &mut FigApp, ui: &mut egui::Ui, chosen: f64) {
         let resp = crate::widgets::dropdown(ui, &shown, 120.0, None);
         crate::a11y::combo(&resp, tr("Interface size"), &shown, crate::a11y::menu_open(&resp));
         crate::right::menu_popup(&resp).show(|ui| {
+            let focused = ui.memory(|memory| memory.focused());
+            let step = ui.input(|input| {
+                if input.key_pressed(egui::Key::ArrowDown) || (input.key_pressed(egui::Key::Tab) && !input.modifiers.shift) {
+                    1
+                } else if input.key_pressed(egui::Key::ArrowUp) || (input.key_pressed(egui::Key::Tab) && input.modifiers.shift) {
+                    -1
+                } else {
+                    0
+                }
+            });
+            let mut rows = Vec::with_capacity(crate::ui_scale::SIZES.len());
             for size in crate::ui_scale::SIZES {
-                if crate::right::menu_check(ui, (chosen - size).abs() < 1e-6, &percent(size), "") {
+                let label = percent(size);
+                let selected = (chosen - size).abs() < 1e-6;
+                let row = crate::right::menu_row(ui, &format!("{}{label}", if selected { "✓ " } else { "    " }), "", 0.0, |_, _, _| {});
+                crate::a11y::menu_item(&row, &label, "", Some(selected));
+                if row.has_focus() {
+                    ui.memory_mut(|memory| memory.set_focus_lock_filter(row.id, egui::EventFilter { tab: true, ..Default::default() }));
+                }
+                rows.push(row.id);
+                if row.clicked() {
                     app.run("pref.uiScale", json!({"scale": size}));
                     ui.close();
                 }
+            }
+            // Spatial focus can jump to a control behind the popup when the menu overlaps the
+            // Preferences window. Once an item is focused, walk the menu's own rows instead.
+            if step != 0
+                && let Some(index) = rows.iter().position(|id| Some(*id) == focused)
+            {
+                let next = index.saturating_add_signed(step).min(rows.len() - 1);
+                ui.memory_mut(|memory| {
+                    memory.request_focus(rows[next]);
+                    memory.move_focus(egui::FocusDirection::None);
+                });
             }
         });
     });
@@ -543,7 +577,7 @@ fn batch_rename_dialog(app: &mut FigApp, ctx: &Context) {
     let mut open = true;
     let mut cancel = false;
     let mut apply = false;
-    window(tr("Rename layers"), ctx).id(egui::Id::new("Rename layers")).open(&mut open).show(ctx, |ui| {
+    window(tr("Rename layers"), ctx).id(egui::Id::unique("Rename layers")).open(&mut open).show(ctx, |ui| {
         ui.set_width(320.0);
         ui.label(RichText::new(trn("{n} layers", n, &[])).color(t.text_secondary));
         ui.add_space(6.0);
@@ -665,7 +699,11 @@ pub(crate) fn file_saved(app: &mut FigApp, result: &Value) {
 }
 
 fn result_file_name(result: &Value) -> String {
-    result["path"].as_str().and_then(|p| Path::new(p).file_name()).map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()
+    match result["path"].as_str() {
+        Some(p) => Path::new(p).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
+        // A download (#969).
+        None => result["name"].as_str().unwrap_or_default().to_owned(),
+    }
 }
 
 /// The `.fig` result stays an export: native save state is unchanged, and omissions are reported.
@@ -681,6 +719,15 @@ pub(crate) fn fig_exported(app: &mut FigApp, result: &Value) {
 /// Save the whole file as `.fig`; the toast says how much was left out.
 fn save_fig(app: &mut FigApp, name: &str) {
     let filename = format!("{name}.fig");
+    if app.services.downloads() {
+        if let Some(mut r) = app.run("file.export", json!({"format": "fig"}))
+            && app.download(&filename, &r)
+        {
+            r["name"] = json!(filename);
+            fig_exported(app, &r);
+        }
+        return;
+    }
     app.pick_save(tr("Export"), &filename, &["fig"], |app, p| {
         if let Some(r) = app.run("file.export", json!({"format": "fig", "path": p.to_string_lossy()})) {
             fig_exported(app, &r);
@@ -772,7 +819,7 @@ fn export_dialog(app: &mut FigApp, ctx: &Context) {
         // The PDF preset's print options.
         ui.add_space(6.0);
         caption(ui, tr("PDF print options"));
-        if let Some(next) = crate::export_panel::print_options(ui, egui::Id::new("export_dialog_print"), &print) {
+        if let Some(next) = crate::export_panel::print_options(ui, egui::Id::unique("export_dialog_print"), &print) {
             app.ui.pdf_print = next;
         }
         divider(ui);

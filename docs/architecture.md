@@ -81,6 +81,7 @@ input.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | minor | Portable text review: omit unchanged appearances from text updates without new wire properties, share immutable geometry across edits/history, cache exact-face availability with scan invalidation, and retain/update six missing-font translations. Server-side missing-font display retained; no font binaries. Readiness estimates unchanged. |
 | 2026-10-22 | minor | Portable glyph geometry preserves missing-font text across native saves and collaboration; commands and gestures protect edits, and SVG/PDF retain outlines. No font binaries. Readiness estimates unchanged. |
 | 2026-10-11 | minor | `collab-net` hosts through one hub for the app's sessions and the standalone server; added the `figcraft-server` app |
 | 2026-10-10 | minor | Merged main after #101–#103: WASM plugins (plugins area 0% → 35% breadth, 20% ready; ecosystem 5% → 20%) and the multiplayer core without networking (multiplayer 5% → 15% breadth, 5% ready; collaboration 8% → 12%); menu breadth 97.5% → 98.5% (200/203); ready for real work ~46% → ~47%; full parity 420–790 h → 390–745 h; beta 210–380 h → 200–365 h. Fixed the stated weight sums (areas 1–16 sum to 94, total 113; percentages were already computed with those) |

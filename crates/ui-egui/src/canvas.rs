@@ -129,6 +129,7 @@ struct JobKey {
     /// Text lays out anew when fonts arrive (system fonts load in the background).
     fonts: u64,
     proof: bool,
+    dots: Option<figcraft_render::Dots>,
 }
 
 impl FigApp {
@@ -163,12 +164,16 @@ fn pointer_event(app: &FigApp, kind: PointerKind, pos: Pos2, m: &egui::Modifiers
     }
 }
 
+/// Run one canvas pass: update the viewport size and first-fit zoom; handle pointer/key input
+/// and accessibility; draw the drop overlay, guides, live pointer and preedit; request/poll
+/// renders and upload the texture; draw the page background and last texture; then draw overlays,
+/// labels, handles, comments, versions/branch/dev/live UI and the cursor.
 pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
     let rect = ui.max_rect();
     app.canvas.rect = rect;
     let ctx = ui.ctx().clone();
     let ppp = ctx.pixels_per_point();
-    let resp = ui.interact(rect, ui.id().with("canvas"), Sense::click_and_drag());
+    let resp = ui.interact(rect, ui.scope_id().with("canvas"), Sense::click_and_drag());
     let key_box = app.ui.key_box;
     crate::a11y::canvas(&mut app.ui.nav, &resp, || key_box.map_or_else(|| describe(&app.session), describe_box));
     if let Ok(ds) = app.session.ds_mut()
@@ -183,15 +188,35 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
         }
     }
     let own_cursor = input(app, ui, &resp);
-    // A browser names no dragged file until the drop, so documents there still say "import".
+    // A browser names no dragged file until the drop, so documents there still say "import", or
+    // in Dev Mode show the Dev Mode note, though they open when dropped.
     let documents = ctx.input(|i| i.raw.hovered_files.iter().all(|f| f.path.as_deref().is_some_and(crate::is_document)));
-    crate::drop_overlay(&ctx, ctx.content_rect(), if documents { tr("Drop to open") } else { tr("Drop to import") });
+    let label = if documents {
+        tr("Drop to open")
+    } else if app.ui.right_tab == crate::RightTab::Inspect {
+        tr("Dev Mode only inspects: switch to Design (Shift+D) to edit")
+    } else {
+        tr("Drop to import")
+    };
+    crate::drop_overlay(&ctx, ctx.content_rect(), label);
     crate::guides::end_released(&ctx);
     crate::live::track_pointer(app, &ctx);
     app.sync_preedit();
     // Retained rendering snaps the view outward and adds one pixel on each axis.
     let max_texture_side = (ctx.input(|i| i.max_texture_side).min(16_384) as u32).saturating_sub(1).max(1);
-    request_render(app, worker, ppp, max_texture_side);
+    let t = Tokens::get(&ctx);
+    // Page background (also behind a stale/partial texture).
+    let bg = app
+        .session
+        .ds()
+        .ok()
+        .and_then(|ds| match ds.doc.node(ds.page).map(|n| &n.kind) {
+            Some(NodeKind::Page { background, .. }) => Some(doc_c32(&ctx, *background)),
+            _ => None,
+        })
+        .unwrap_or(t.canvas);
+    let dots = crate::board_bar::dots(app, bg, &t);
+    request_render(app, worker, ppp, max_texture_side, dots);
     // Every finished render is shown, even when a newer one is already on its way: renders finish
     // in order, and an edit every frame (a drag) would otherwise never show until it stopped.
     let shown = app.session.ds().map(|ds| (ds.uid, ds.page)).ok();
@@ -223,17 +248,6 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
         app.canvas.tex_coarse = done.coarse;
     }
     let painter = ui.painter_at(rect);
-    let t = Tokens::get(&ctx);
-    // Page background (also behind a stale/partial texture).
-    let bg = app
-        .session
-        .ds()
-        .ok()
-        .and_then(|ds| match ds.doc.node(ds.page).map(|n| &n.kind) {
-            Some(NodeKind::Page { background, .. }) => Some(doc_c32(&ctx, *background)),
-            _ => None,
-        })
-        .unwrap_or(t.canvas);
     painter.rect_filled(rect, CornerRadius::ZERO, bg);
     crate::theme::set_canvas_page(&ctx, bg);
     if let (Some(tex), Some(v), true) = (&app.canvas.texture, &app.canvas.tex_view, shown.is_some() && app.canvas.tex_of == shown) {
@@ -244,6 +258,7 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
         let image_rect = presented_image_rect(tl, v, zoom, ppp, pixel_preview);
         painter.image(tex.id(), image_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
     }
+    crate::dev_mode::refresh_measurements(app);
     app.session.tool.labels = overlays(app, &painter, &t);
     crate::frame_labels::rename_field(app, ui);
     // The zoom tool's area.
@@ -256,6 +271,11 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
     }
     crate::dev_mode::draw(app, &painter);
     crate::handles::draw(app, &painter);
+    crate::board_facilitate::badges(app, &painter);
+    crate::board_bar::stamp_author(app, &painter, ctx.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p)));
+    crate::board_bar::show(app, &ctx);
+    crate::board_facilitate::show(app, &ctx, rect);
+    crate::widget_bar::show(app, &ctx);
     crate::selection_spacing::draw(app, &painter);
     crate::comments::draw(app, &painter);
     crate::live_text::draw(app, &painter);
@@ -346,7 +366,7 @@ fn covers(outer: &figcraft_render::View, inner: &figcraft_render::View) -> bool 
     o.x0 <= i.x0 + eps && o.y0 <= i.y0 + eps && o.x1 >= i.x1 - eps && o.y1 >= i.y1 - eps
 }
 
-fn request_render(app: &mut FigApp, worker: &mut Worker, ppp: f32, max_texture_side: u32) {
+fn request_render(app: &mut FigApp, worker: &mut Worker, ppp: f32, max_texture_side: u32, dots: Option<figcraft_render::Dots>) {
     let Ok(ds) = app.session.ds() else { return };
     let rect = app.canvas.rect;
     let (mut ox, mut oy) = ds.view.origin();
@@ -385,6 +405,7 @@ fn request_render(app: &mut FigApp, worker: &mut Worker, ppp: f32, max_texture_s
         solo: ds.focused(),
         fonts: figcraft_text::layout_generation(),
         proof,
+        dots,
     };
     if let Some(previous) = &app.canvas.submitted {
         let previous_origin = (previous.origin.0 as f64 / 1000.0, previous.origin.1 as f64 / 1000.0);
@@ -407,6 +428,7 @@ fn request_render(app: &mut FigApp, worker: &mut Worker, ppp: f32, max_texture_s
         skip: vec![],
         solo: key.solo,
         proof,
+        dots,
         uid: ds.uid,
         zoom_preview: ds.view.pixel_preview_scale().is_none(),
         at: web_time::Instant::now(),
@@ -498,8 +520,11 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
         return true;
     }
     let ctx = ui.ctx().clone();
-    let (mods, scroll, zoom_delta, hover_pos, space) =
-        ctx.input(|i| (i.modifiers, i.smooth_scroll_delta, i.zoom_delta(), i.pointer.hover_pos(), i.key_down(egui::Key::Space)));
+    // Two fingers pan as well as pinch (a touch screen has no scroll wheel).
+    let (mods, scroll, zoom_delta, hover_pos, space) = ctx.input(|i| {
+        let pan = i.multi_touch().map_or(egui::Vec2::ZERO, |m| m.translation_delta);
+        (i.modifiers, i.smooth_scroll_delta + pan, i.zoom_delta(), i.pointer.hover_pos(), i.key_down(egui::Key::Space))
+    });
     let editing_text = app.session.ds().map(|d| d.text_edit.is_some()).unwrap_or(false);
     let typing_elsewhere = crate::a11y::field_focused(&ctx);
     app.canvas.space_pan = space && !editing_text && !typing_elsewhere;
@@ -507,12 +532,18 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
         return false;
     }
     // Dropped files import onto the canvas, behind a card while they do ([`crate::pending_open`]);
-    // a dropped document opens as a file of its own, as on the home screen.
+    // a dropped document opens as a file of its own, as on the home screen. Dev Mode imports
+    // nothing into the design, and says so once for the whole drop.
     let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+    let mut refused = false;
     for f in dropped {
         let path = f.path().to_path_buf();
         if crate::is_document(&path) {
             crate::pending_open::open_dropped(app, &f);
+            continue;
+        }
+        if refused || crate::menus::dev_mode_refuses(app, "file.import") {
+            refused = true;
             continue;
         }
         let pt = hover_pos.map(|h| app.to_page(h)).unwrap_or_default();
@@ -539,7 +570,7 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
         }
         // Leaving the canvas: nothing is hovered there any more.
         if !app.canvas.dragging && std::mem::take(&mut app.canvas.hovering) {
-            app.session.vector_pointer_left();
+            app.session.pointer_left();
         }
         // A pan whose button was released off the canvas is over.
         if !ctx.input(|i| i.pointer.button_down(egui::PointerButton::Middle) || i.pointer.primary_down()) {
@@ -604,7 +635,25 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
         open_context_menu(app, pos, mods.command);
         return true;
     }
-    if resp.double_clicked() {
+    // A third quick click is counted as a triple, not a double (a click elsewhere in between still
+    // leaves its time in the sequence): it means the same here — edit, enter, open — unless a
+    // vector or text is being edited, where a triple already has its own meaning. A triple on
+    // empty canvas still means a double in vector edit mode: the double-click that entered edit
+    // mode counts on, so leaving it right away would otherwise take a fourth click or a pause.
+    let ds = app.session.ds().ok();
+    let editing = ds.is_some_and(|d| d.vector_edit.is_some() || d.text_edit.is_some());
+    // Only a triple click asks (it walks the parts' render bounds).
+    let empty_canvas = || {
+        ds.is_some_and(|d| {
+            let Some(ve) = d.vector_edit.as_ref().filter(|v| v.anchor.is_none() && d.text_edit.is_none()) else {
+                return false;
+            };
+            let p = app.to_page(pos);
+            let tol = 6.0 / d.view.zoom.max(1e-6);
+            ve.parts().iter().all(|part| d.doc.world_render_bounds(part.id).is_none_or(|b| !b.inflate(tol * 4.0, tol * 4.0).contains(p)))
+        })
+    };
+    if resp.double_clicked() || (resp.triple_clicked() && (!editing || empty_canvas())) {
         let ev = pointer_event(app, PointerKind::DoubleClick, pos, &mods);
         if let Err(e) = app.session.pointer(&ev) {
             app.toast(e.to_string());
@@ -637,7 +686,7 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
     } else {
         // Something over the canvas took the pointer.
         if std::mem::take(&mut app.canvas.hovering) {
-            app.session.vector_pointer_left();
+            app.session.pointer_left();
         }
         None
     };
@@ -654,6 +703,13 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
     }
     if let Some(k) = kind {
         send(app, k, pos, &mods);
+        // The pointer also let go within this frame (a quick click, or a slow frame): the tools get
+        // the release too, so the press's gesture ends — a quick click with a shape tool still
+        // draws and returns to Move, and a double-click right after drawing finds the Move tool.
+        if matches!(k, PointerKind::Down) && primary_released {
+            app.canvas.dragging = false;
+            send(app, PointerKind::Up, pos, &mods);
+        }
     }
     true
 }
@@ -685,6 +741,7 @@ pub fn open_context_menu(app: &mut FigApp, pos: Pos2, deep: bool) {
         }
     }
     app.ui.context_menu = Some((pos, app.session.selection()));
+    app.ui.context_menu_shown = false;
 }
 
 fn stroke(c: Color32, w: f32) -> Stroke {
@@ -939,7 +996,8 @@ fn overlays(app: &FigApp, painter: &egui::Painter, t: &Tokens) -> Vec<(NodeId, [
             }
         }
         // The focus view's bar names its frame.
-        let labelled = focus.is_none() && (n.kind.is_frame_like() || matches!(n.kind, NodeKind::Section { .. }));
+        // Board objects (stickies, shapes with text, stamps) are frames without a name label.
+        let labelled = focus.is_none() && (n.kind.is_frame_like() || matches!(n.kind, NodeKind::Section { .. })) && !n.is_board_atom();
         if labelled && let Some(q) = crate::frame_labels::draw(app, painter, t, &doc, *c, sel.contains(c), ds.hover == Some(*c)) {
             labels.push((*c, q.map(|p| app.to_page(p))));
         }
@@ -1010,15 +1068,17 @@ fn overlays(app: &FigApp, painter: &egui::Painter, t: &Tokens) -> Vec<(NodeId, [
         let hover_on = |id| ov.vector_hover.filter(|_| ov.vector_hover_on.unwrap_or(ve.id) == id);
         for part in &ve.others {
             if let Some(po) = figcraft_engine::vectoredit::overlay(&doc, &ve.view(part)) {
-                vector_overlay(app, painter, &po, !width_tool, hover_on(part.id), false);
+                vector_overlay(app, painter, &po, !width_tool, hover_on(part.id), false, None);
             }
         }
-        vector_overlay(app, painter, &o, !width_tool, hover_on(ve.id), true);
+        vector_overlay(app, painter, &o, !width_tool, hover_on(ve.id), true, ov.vector_add);
         if width_tool {
             width_overlay(app, painter, &doc, &ve, zoom);
         } else if let Some(c) = app.session.vector_edit_box() {
+            // The box around several selected points draws no corner handles: they would read as
+            // points. Its corners and edges still scale the points when dragged.
             let label = format!("{} × {}", fmt((c[1] - c[0]).hypot()), fmt((c[3] - c[0]).hypot()));
-            size_label = transform_box(app, painter, c.map(|p| app.to_screen(p.x, p.y)), accent(painter), true, 4, Some(label));
+            size_label = transform_box(app, painter, c.map(|p| app.to_screen(p.x, p.y)), accent(painter), true, 0, Some(label));
         }
     }
     // Selection.
@@ -1034,6 +1094,8 @@ fn overlays(app: &FigApp, painter: &egui::Painter, t: &Tokens) -> Vec<(NodeId, [
             && let Some((_, w, h)) = selection_frame(&doc, &sel)
         {
             let is_line = sel.len() == 1 && matches!(sel.first().and_then(|i| doc.node(*i)).map(|n| &n.kind), Some(NodeKind::Line));
+            // A selected connector's handles are its two ends (drag one onto another object).
+            let connector = figcraft_engine::board::selected_connector_ends(&doc, &sel).map(|(_, ends)| ends);
             let mut label = if is_line { fmt(w) } else { format!("{} × {}", fmt(w), fmt(h)) };
             let scale = app.session.tool.overlay.scale;
             if let Some(hint) = scale {
@@ -1044,17 +1106,32 @@ fn overlays(app: &FigApp, painter: &egui::Painter, t: &Tokens) -> Vec<(NodeId, [
             let tiny = figcraft_engine::tools::box_sides_px(&b, zoom).1 < figcraft_engine::tools::SMALL_BOX_PX;
             // Measuring to another layer (Alt held) shows just the outlines: no handles or size.
             let measuring = app.session.tool.overlay.measure_box.is_some();
-            // Locked layers (selected in the layers panel) can't be resized: no handles either.
-            let handles = if measuring || sel.iter().any(|i| figcraft_engine::tools::locked_in(&doc, *i)) {
-                0
-            } else if is_line {
-                2
-            } else if tiny {
-                0
-            } else {
-                4
-            };
-            size_label = transform_box(app, painter, b.map(|p| app.to_screen(p.x, p.y)), col, sel.len() > 1, handles, (!measuring).then_some(label));
+            // Locked layers (selected in the layers panel) can't be resized, nor anything in Dev
+            // Mode: no handles either.
+            let handles =
+                if measuring || app.session.tool.dev_mode || connector.is_some() || sel.iter().any(|i| figcraft_engine::tools::locked_in(&doc, *i)) {
+                    0
+                } else if is_line {
+                    2
+                } else if tiny {
+                    0
+                } else {
+                    4
+                };
+            size_label = transform_box(
+                app,
+                painter,
+                b.map(|p| app.to_screen(p.x, p.y)),
+                col,
+                sel.len() > 1,
+                handles,
+                (!measuring && connector.is_none()).then_some(label),
+            );
+            for end in connector.into_iter().flatten().filter(|_| !app.session.tool.dev_mode) {
+                let c = app.to_screen(end.x, end.y);
+                painter.circle_filled(c, 5.0, Color32::WHITE);
+                painter.circle_stroke(c, 5.0, stroke(col, 1.5));
+            }
             if !measuring {
                 arc_overlay(app, painter, col);
                 shape_overlay(app, painter, col);
@@ -1170,6 +1247,9 @@ fn overlays(app: &FigApp, painter: &egui::Painter, t: &Tokens) -> Vec<(NodeId, [
                 }
             }
         }
+    } else if let Some([x0, y0, x1, y1]) = ov.rubber {
+        // A connector being drawn, or one of its ends dragged: from where it starts to the pointer.
+        painter.line_segment([app.to_screen(x0, y0), app.to_screen(x1, y1)], stroke(accent(painter), 1.5));
     }
     // Eraser brush (vector edit mode).
     if let Some([x, y, r]) = ov.brush {
@@ -1316,8 +1396,9 @@ fn bezier_handle(painter: &egui::Painter, v: Pos2, e: Pos2, r: f32, fill: Color3
     painter.circle_stroke(e, r, stroke(accent(painter), 1.0));
 }
 
-/// Vector edit mode: a layer's segments, handles and points (`points`) with its `hover`ed part, and
-/// for the `active` layer the closed area under the paint bucket and the pen's rubber band.
+/// Vector edit mode: a layer's segments, handles and points (`points`) with its `hover`ed part, the
+/// `add` point a press would put on the outline, and for the `active` layer the closed area under
+/// the paint bucket and the pen's rubber band.
 fn vector_overlay(
     app: &FigApp,
     painter: &egui::Painter,
@@ -1325,6 +1406,7 @@ fn vector_overlay(
     points: bool,
     hover: Option<figcraft_engine::vectoredit::VHit>,
     active: bool,
+    add: Option<figcraft_engine::tools::VectorAdd>,
 ) {
     use figcraft_engine::vectoredit::VHit;
     let ov = &app.session.tool.overlay;
@@ -1372,6 +1454,22 @@ fn vector_overlay(
             painter.circle_stroke(p, 7.5, stroke(accent(painter), 1.0));
         }
     }
+    // The point a press would add to the outline: the pen's ghost anchor where it is over a
+    // segment, or a segment's midpoint under the Move tool (which grows and fills once the pointer
+    // is on it, when a press adds it).
+    if let Some(a) = add {
+        let p = app.to_screen(a.at[0], a.at[1]);
+        let col = accent(painter);
+        if a.midpoint {
+            let (r, fill) = if a.on { (5.5, col) } else { (3.5, Color32::from_white_alpha(190)) };
+            painter.circle_filled(p, r, fill);
+            painter.circle_stroke(p, r, stroke(if a.on { Color32::WHITE } else { col.gamma_multiply(0.7) }, 1.2));
+        } else {
+            let r = Rect::from_center_size(p, vec2(7.0, 7.0));
+            painter.rect_filled(r, CornerRadius::same(5), Color32::from_white_alpha(160));
+            painter.rect_stroke(r, CornerRadius::same(5), stroke(col.gamma_multiply(0.8), 1.0), StrokeKind::Inside);
+        }
+    }
     if let Some([x0, y0, x1, y1]) = ov.rubber.filter(|_| active) {
         painter.add(Shape::dashed_line(&[app.to_screen(x0, y0), app.to_screen(x1, y1)], stroke(accent(painter), 1.0), 4.0, 3.0));
     }
@@ -1399,19 +1497,48 @@ fn region_hatch(app: &FigApp, painter: &egui::Painter) {
 fn builder_overlay(app: &FigApp, painter: &egui::Painter, t: &Tokens, arr: &figcraft_engine::shapebuilder::Arrangement) {
     let ov = &app.session.tool.overlay;
     let screen = |r: &figcraft_engine::shapebuilder::Region| -> Vec<Vec<Pos2>> {
-        r.polys.iter().map(|poly| poly.iter().map(|p| app.to_screen(p.x, p.y)).collect()).collect()
+        r.polys.iter().filter_map(|poly| clean_poly(poly.iter().map(|p| app.to_screen(p.x, p.y)))).collect()
     };
     // Edges read on any fill: a light halo under a thin accent line.
     for r in &arr.regions {
         for poly in screen(r) {
-            painter.add(Shape::closed_line(poly.clone(), stroke(Color32::from_white_alpha(150), 2.5)));
-            painter.add(Shape::closed_line(poly, stroke(accent(painter), 1.0)));
+            for seg in segments(&poly) {
+                painter.add(Shape::line(seg.to_vec(), stroke(Color32::from_white_alpha(150), 2.5)));
+                painter.add(Shape::line(seg.to_vec(), stroke(accent(painter), 1.0)));
+            }
         }
     }
     let col = if ov.builder_remove { t.danger } else { accent(painter) };
     for r in ov.builder_regions.iter().filter_map(|i| arr.regions.get(*i)) {
         hatched(painter, &screen(r), col);
     }
+}
+
+/// A region contour in screen space, ready to draw: non-finite and repeated points dropped (the
+/// last point back at the first, the points a sliver doubles back on) and sub-pixel slivers left
+/// out, since they're invisible anyway.
+fn clean_poly(points: impl IntoIterator<Item = Pos2>) -> Option<Vec<Pos2>> {
+    let mut out: Vec<Pos2> = Vec::new();
+    for q in points {
+        if !(q.x.is_finite() && q.y.is_finite()) || out.last().is_some_and(|l| l.distance(q) < 0.01) {
+            continue;
+        }
+        out.push(q);
+    }
+    if out.len() > 1 && out.first().is_some_and(|f| f.distance(*out.last().unwrap_or(f)) < 0.01) {
+        out.pop();
+    }
+    let n = out.len();
+    let twice_area: f32 = (0..n).map(|k| out[k].x * out[(k + 1) % n].y - out[(k + 1) % n].x * out[k].y).sum();
+    (n > 2 && twice_area.abs() > 0.4).then_some(out)
+}
+
+/// A closed polygon as its segments. Drawn segment by segment rather than as one closed path: a
+/// joined path asks the tessellator for a mitre at every hairpin a region's sliver doubles back on,
+/// and a zero-length segment there divides by a zero normal, which draws a spike across the canvas.
+fn segments(poly: &[Pos2]) -> impl Iterator<Item = [Pos2; 2]> + '_ {
+    let n = poly.len();
+    (0..n).map(move |k| [poly[k], poly[(k + 1) % n]])
 }
 
 /// Polygons hatched and outlined in `col` (an area about to be filled, merged or removed), each
@@ -1423,8 +1550,10 @@ fn hatched(painter: &egui::Painter, polys: &[Vec<Pos2>], col: Color32) {
         painter.line_segment(l, stroke(col, 1.25));
     }
     for poly in polys {
-        painter.add(Shape::closed_line(poly.clone(), stroke(halo, 4.0)));
-        painter.add(Shape::closed_line(poly.clone(), stroke(col, 2.0)));
+        for seg in segments(poly) {
+            painter.add(Shape::line(seg.to_vec(), stroke(halo, 4.0)));
+            painter.add(Shape::line(seg.to_vec(), stroke(col, 2.0)));
+        }
     }
 }
 
@@ -1465,7 +1594,9 @@ fn hatch(polys: &[Vec<Pos2>], gap: f32) -> Vec<[Pos2; 2]> {
 }
 
 /// The layers that get canvas labels and layout grids, in z-order: the page's visible top-level
-/// layers and, inside sections whose contents show, their visible children (sections nest).
+/// layers and, inside sections whose contents show, their visible children (sections nest). A
+/// section comes after its children, so its title pill draws over (and takes clicks from) the
+/// labels of frames near its top-left (#1150).
 fn boards(doc: &Document, page: NodeId) -> Vec<NodeId> {
     fn walk(doc: &Document, id: NodeId, depth: usize, out: &mut Vec<NodeId>) {
         let Some(n) = doc.node(id) else { return };
@@ -1474,10 +1605,10 @@ fn boards(doc: &Document, page: NodeId) -> Vec<NodeId> {
             if !cn.visible {
                 continue;
             }
-            out.push(*c);
             if matches!(cn.kind, NodeKind::Section { contents_hidden: false }) && depth < 32 {
                 walk(doc, *c, depth + 1, out);
             }
+            out.push(*c);
         }
     }
     let mut out = Vec::new();
@@ -1551,6 +1682,10 @@ pub fn fmt(v: f64) -> String {
     let r = (v * 100.0).round() / 100.0;
     if (r - r.round()).abs() < 1e-9 { format!("{}", r.round() as i64) } else { format!("{r}") }
 }
+
+#[cfg(test)]
+#[path = "builder_poly_tests.rs"]
+mod builder_poly_tests;
 
 #[cfg(test)]
 #[path = "zoom_preview_tests.rs"]

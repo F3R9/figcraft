@@ -35,9 +35,23 @@ pub const UI_COMMANDS: &[&str] = &[
 /// `event_text` is the text the platform handed over with the paste event (the browser has no
 /// other way to read it). `at`: the page point to paste at (Paste here); `None` pastes in the
 /// middle of the view.
+/// In Dev Mode only a comment's link pastes (it opens the thread); everything else would edit.
 pub fn paste(app: &mut FigApp, event_text: Option<&str>, at: Option<(f64, f64)>) {
+    // A gesture injected through the control channel pastes only our own copied layers: it must not
+    // read (and so expose) the user's system clipboard.
+    if app.control_synthetic {
+        // Synthetic input is user-like: Dev Mode refuses the paste here too, and only the engine's
+        // own copied layers are pasted (the system clipboard is never read).
+        if !dev_mode_refuses(app, "edit.paste") {
+            app.run("edit.paste", at.map_or(json!({}), |(x, y)| json!({"x": x, "y": y})));
+        }
+        return;
+    }
     // Only HTML that holds readable design data takes this path; other HTML pastes as before.
     if let Some(html) = app.services.clipboard_get_html().filter(|h| figcraft_engine::cmd::edit::design_clipboard_buffer(h).is_some()) {
+        if dev_mode_refuses(app, "edit.paste") {
+            return;
+        }
         let mut params = json!({"html": html});
         if let Some((x, y)) = at {
             params["x"] = json!(x);
@@ -46,6 +60,7 @@ pub fn paste(app: &mut FigApp, event_text: Option<&str>, at: Option<(f64, f64)>)
         if let Some(r) = app.run("edit.pasteDesignLayers", params) {
             // The pasted layers are now our copy: text another app puts on the clipboard later is newer.
             app.ui.last_copy = Some(app.services.clipboard_get_text().unwrap_or_default());
+            app.ui.last_copy_generation = app.session.clipboard.layers_generation;
             let left_out = r["warnings"].as_array().map_or(0, Vec::len);
             if left_out > 0 {
                 app.toast(trn("Pasted design layers; {n} kinds of content were left out", left_out, &[]));
@@ -54,33 +69,63 @@ pub fn paste(app: &mut FigApp, event_text: Option<&str>, at: Option<(f64, f64)>)
         return;
     }
     let sys_text = app.services.clipboard_get_text().or_else(|| event_text.map(str::to_string)).filter(|t| !t.is_empty());
-    let ours = sys_text.is_some() && sys_text == app.ui.last_copy;
+    // The text matching `last_copy` means the system clipboard still holds what we mirrored only
+    // while the engine clipboard is the one we mirrored. A control-channel copy changes the engine
+    // clipboard without writing the system clipboard, so its generation no longer matches and the
+    // user's own text is pasted instead of the programmatic selection.
+    let ours = sys_text.is_some() && sys_text == app.ui.last_copy && app.ui.last_copy_generation == app.session.clipboard.layers_generation;
     let (cx, cy) = at.or_else(|| app.session.ds().ok().map(|d| (d.view.cx, d.view.cy))).unwrap_or((0.0, 0.0));
     if !ours {
         if let Some((png, w, h)) = clipboard_png(app) {
+            if dev_mode_refuses(app, "edit.paste") {
+                return;
+            }
             use base64::Engine as _;
             let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+            // One selected layer that can have fills takes the image as its top fill.
+            if let [target] = app.session.selection()[..]
+                && at.is_none()
+                && app.session.doc().ok().and_then(|d| d.node(target)).is_some_and(|n| figcraft_engine::cmd::create::accepts_image_fill(&n.kind))
+            {
+                app.run("image.place", json!({"data": b64, "target": target}));
+                return;
+            }
             // Centred in the view; Paste here puts its top-left at the point, as it does layers.
             let (x, y) = if at.is_some() { (cx, cy) } else { ((cx - f64::from(w) / 2.0).round(), (cy - f64::from(h) / 2.0).round()) };
             app.run("file.import", json!({"data": b64, "name": "Pasted image.png", "x": x, "y": y}));
             return;
         }
-        // Text from elsewhere when it's newer than our copy, or when we have nothing to paste.
-        if let Some(text) = sys_text.filter(|_| app.ui.last_copy.is_some() || app.session.clipboard.nodes.is_empty()) {
-            // A comment's link opens its thread.
-            if text.trim().starts_with("figcraft://comment/") {
-                app.run("comment.open", json!({"link": text.trim()}));
-            } else if figcraft_engine::looks_like_svg(&text) {
-                use base64::Engine as _;
-                let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
-                app.run_user("file.import", json!({"data": b64, "name": "Pasted SVG.svg", "x": cx, "y": cy, "center": at.is_none()}));
-            } else {
-                app.run("text.create", json!({"text": text, "x": cx, "y": cy}));
-            }
-            return;
+        // Not ours: any other text is newer (another app's text, SVG, a comment link) and wins.
+        // Our own marker for copied layers without a text/SVG mirror is never a text paste; when
+        // the engine copy moved on it falls through to `edit.paste` (the only layers we still have).
+        if let Some(text) = sys_text.filter(|t| !is_clipboard_marker(t)) {
+            return paste_text(app, &text, (cx, cy), at.is_none());
         }
     }
-    app.run("edit.paste", at.map_or(json!({}), |(x, y)| json!({"x": x, "y": y})));
+    if !dev_mode_refuses(app, "edit.paste") {
+        app.run("edit.paste", at.map_or(json!({}), |(x, y)| json!({"x": x, "y": y})));
+    }
+}
+
+/// The marker FigCraft puts on the system clipboard for copied layers with no text/SVG mirror.
+fn is_clipboard_marker(text: &str) -> bool {
+    text.starts_with("figcraft://clipboard/")
+}
+
+/// Paste text from another app at `(cx, cy)` (`center`: centred there): a comment's link opens its
+/// thread, SVG imports, anything else becomes a text layer.
+fn paste_text(app: &mut FigApp, text: &str, (cx, cy): (f64, f64), center: bool) {
+    if text.trim().starts_with("figcraft://comment/") {
+        app.run("comment.open", json!({"link": text.trim()}));
+    } else if dev_mode_refuses(app, "edit.paste") {
+        // Dev Mode: the note says why nothing was pasted.
+    } else if figcraft_engine::looks_like_svg(text) {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+        app.run_user("file.import", json!({"data": b64, "name": "Pasted SVG.svg", "x": cx, "y": cy, "center": center}));
+    } else {
+        app.run("text.create", json!({"text": text, "x": cx, "y": cy}));
+    }
 }
 
 /// The system clipboard's image as PNG bytes, with its size.
@@ -90,6 +135,17 @@ fn clipboard_png(app: &mut FigApp) -> Option<(Vec<u8>, u32, u32)> {
     let mut out = std::io::Cursor::new(Vec::new());
     img.write_to(&mut out, image::ImageFormat::Png).ok()?;
     Some((out.into_inner(), w, h))
+}
+
+/// Dev Mode (the Inspect tab) refuses command `id` from the menus, shortcuts, clipboard, the
+/// Pages list, the layers panel, files dropped on the canvas and the Assets panel: it edits the
+/// design ([`figcraft_engine::devinspect::dev_mode_allows`]). Says so when it does.
+pub fn dev_mode_refuses(app: &mut FigApp, id: &str) -> bool {
+    let refused = app.ui.right_tab == crate::RightTab::Inspect && !figcraft_engine::devinspect::dev_mode_allows(id);
+    if refused {
+        app.toast(tr("Dev Mode only inspects: switch to Design (Shift+D) to edit"));
+    }
+    refused
 }
 
 /// The Actions palette's tab.
@@ -115,6 +171,9 @@ pub fn record_recent(app: &mut FigApp, key: &str) {
 /// Run a menu, shortcut or palette action by id: actions that need the UI (dialogs, panels, the
 /// clipboard) are handled here, the rest go to the engine.
 pub fn invoke(app: &mut FigApp, id: &str) {
+    if dev_mode_refuses(app, id) {
+        return;
+    }
     match id {
         // Edit ▸ Delete (and the Delete binding) with an interaction open in the Prototype tab
         // removes that interaction, not the layer (#767).
@@ -133,6 +192,11 @@ pub fn invoke(app: &mut FigApp, id: &str) {
             app.run(id, json!({}));
         }
         "file.open" => app.open_dialog(),
+        // From the keyboard or a menu, typing goes on in the new sticky.
+        "board.nextSticky" => {
+            app.run(id, json!({"edit": true}));
+        }
+        "help.checkForUpdates" | "app.checkForUpdates" => crate::updates_ui::check(app),
         "plugin.import" => crate::plugins_ui::import_dialog(app),
         "file.import" => app.import_dialog(false),
         "file.placeImage" => app.import_dialog(true),
@@ -150,14 +214,14 @@ pub fn invoke(app: &mut FigApp, id: &str) {
             let ids = app.session.selection();
             if let (Some(first), Ok(doc)) = (ids.first(), app.session.doc()) {
                 let css = figcraft_engine::codegen::code_for(doc, *first, figcraft_engine::codegen::CodeLang::Css);
-                app.services.clipboard_set_text(&css);
+                app.clipboard_set_text(&css);
                 app.toast(tr("Copied as CSS"));
             }
         }
         "edit.copyAsSvg" => {
             let ids = app.session.selection();
             if let Some(svg) = app.session.doc().ok().and_then(|d| figcraft_svg_export(d, &ids)) {
-                app.services.clipboard_set_text(&svg);
+                app.clipboard_set_text(&svg);
                 app.toast(tr("Copied as SVG"));
             }
         }
@@ -169,7 +233,7 @@ pub fn invoke(app: &mut FigApp, id: &str) {
                 // Clipboard images are read as sRGB.
                 figcraft_render::to_srgb(&mut pix, profile);
                 let rgba = figcraft_render::to_rgba8(&pix);
-                app.services.clipboard_set_png(pix.width(), pix.height(), &rgba);
+                app.clipboard_set_png(pix.width(), pix.height(), &rgba);
                 app.toast(tr("Copied as PNG"));
             }
         }
@@ -181,12 +245,16 @@ pub fn invoke(app: &mut FigApp, id: &str) {
                 .iter()
                 .filter_map(|i| doc.and_then(|d| d.node(*i)).and_then(|n| n.kind.text().map(|t| t.characters.clone())))
                 .collect();
-            app.services.clipboard_set_text(&text.join("\n"));
+            app.clipboard_set_text(&text.join("\n"));
             app.toast(tr("Copied as text"));
         }
         "edit.copyLink" => {
-            let ids = app.session.selection();
-            app.services.clipboard_set_text(&format!("figcraft://node/{}", ids.first().map(|i| i.0).unwrap_or(0)));
+            // Only a selected layer has a link, and the copy goes through the control-channel fence
+            // (`clipboard_set_text`): a synthetic gesture never replaces the user's clipboard.
+            if let Some(id) = app.session.selection().first() {
+                app.clipboard_set_text(&format!("figcraft://node/{}", id.0));
+                app.toast(tr("Link copied"));
+            }
         }
         "edit.findReplace" => app.ui.find = Some((String::new(), String::new())),
         // The Actions palette invokes commands without parameters. These values are edited in
@@ -197,7 +265,7 @@ pub fn invoke(app: &mut FigApp, id: &str) {
         // The file name in the left panel's header turns into its editor, the name selected.
         "file.rename" => {
             app.ui.left_tab = crate::LeftTab::File;
-            app.ui.left_collapsed = false;
+            app.ui.open_left_panel();
             app.ui.rename_file = true;
         }
         "text.link" => app.ui.menu_input = Some(crate::dialogs::MenuInput::Link(String::new())),
@@ -212,7 +280,7 @@ pub fn invoke(app: &mut FigApp, id: &str) {
         "tool.set" => app.ui.tool_flyout = Some("move"),
         "page.select" => {
             app.ui.left_tab = crate::LeftTab::File;
-            app.ui.left_collapsed = false;
+            app.ui.open_left_panel();
             app.ui.pages_open = true;
         }
         // From a menu the link is pasted into the Join dialog (`collab.join {link}` joins directly).
@@ -226,10 +294,15 @@ pub fn invoke(app: &mut FigApp, id: &str) {
             let mirror = doc.and_then(|d| text_layers_text(d, &ids).or_else(|| figcraft_svg_export(d, &ids)));
             app.run(id, json!({}));
             // Mirror to the system clipboard (text or SVG, else a marker) and remember it, so a
-            // later paste knows whether the clipboard still holds our layers.
-            let text = mirror.unwrap_or_else(|| format!("figcraft://clipboard/{}", ids.len()));
-            app.services.clipboard_set_text(&text);
-            app.ui.last_copy = Some(text);
+            // later paste knows whether the clipboard still holds our layers. Control-channel
+            // gestures keep the engine's copy but never replace the user's clipboard; `run` then
+            // invalidates the old mirror because it no longer describes the engine clipboard.
+            if !app.control_synthetic {
+                let text = mirror.unwrap_or_else(|| format!("figcraft://clipboard/{}", ids.len()));
+                app.clipboard_set_text(&text);
+                app.ui.last_copy = Some(text);
+                app.ui.last_copy_generation = app.session.clipboard.layers_generation;
+            }
         }
         "edit.paste" => paste(app, None, None),
         "file.close" if app.session.ds().is_ok_and(|d| d.is_dirty() && d.branch_of.is_none()) => {
@@ -248,6 +321,15 @@ pub fn invoke(app: &mut FigApp, id: &str) {
 /// Every visible top-level frame of the page as one PDF page each, through a save dialog.
 fn export_frames_pdf(app: &mut FigApp) {
     let name = app.session.doc().map(|d| d.name.clone()).unwrap_or_else(|_| "Untitled".into());
+    if app.services.downloads() {
+        let file = format!("{name}.pdf");
+        if let Some(r) = app.run("file.exportFramesPdf", json!({}))
+            && app.download(&file, &r)
+        {
+            app.toast(trf("Exported {name}", &[("name", &file)]));
+        }
+        return;
+    }
     app.pick_save(tr("Export"), &format!("{name}.pdf"), &["pdf"], |app, p| {
         if app.run("file.exportFramesPdf", json!({"path": p.to_string_lossy()})).is_some() {
             app.toast(trf("Exported {name}", &[("name", &p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default())]));
@@ -358,7 +440,7 @@ fn recent_menu(app: &mut FigApp, ui: &mut Ui, prefix: &str, key: &str, label: &s
 /// it. `key` names the submenu (its menu path, unique in its menu tree). Returns what `add`
 /// returned.
 pub(crate) fn submenu<R>(ui: &mut Ui, key: &str, label: &str, t: &Tokens, add: impl FnOnce(&mut Ui) -> Option<R>) -> Option<R> {
-    submenu_at(ui, Id::new(("submenu", key)), key, label, 4.0, false, t, add)
+    submenu_at(ui, Id::unique(("submenu", key)), key, label, 4.0, false, t, add)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -418,12 +500,14 @@ struct At {
     path: String,
 }
 
+/// Scoped egui id for the current menu level.
 fn at_key(ui: &Ui) -> Id {
-    ui.id().with("menu_level")
+    ui.scope_id().with("menu_level")
 }
 
+/// Return the current menu root/path, defaulting to the main menu root.
 fn level_at(ui: &Ui) -> At {
-    ui.data(|d| d.get_temp::<At>(at_key(ui))).unwrap_or(At { root: Id::new("menus"), path: String::new() })
+    ui.data(|d| d.get_temp::<At>(at_key(ui))).unwrap_or(At { root: Id::unique("menus"), path: String::new() })
 }
 
 fn with_level<R>(ctx: &egui::Context, at: &At, f: impl FnOnce(&mut Level) -> R) -> R {
@@ -626,10 +710,19 @@ fn submenu_at<R>(
     if !open {
         return None;
     }
-    let pos = pos2(r.max.x + gap, r.min.y - 8.0);
+    let mut pos = pos2(r.max.x + gap, r.min.y - 8.0);
+    // No room beside the row (a phone): the submenu covers its parent instead of running off screen.
+    let screen = ui.ctx().content_rect();
+    let cramped = pos.x + MENU_W > screen.max.x;
+    if cramped {
+        pos.x = (screen.max.x - MENU_W - 8.0).max(screen.min.x + 4.0);
+    }
     let child = At { root: at.root, path: key.to_string() };
-    let shown =
-        egui::Area::new(area).fixed_pos(pos).order(egui::Order::Foreground).constrain(constrain).show(ui.ctx(), |ui| menu_frame(ui, t, child, add));
+    let shown = egui::Area::new(area)
+        .fixed_pos(pos)
+        .order(egui::Order::Foreground)
+        .constrain(constrain || cramped)
+        .show(ui.ctx(), |ui| menu_frame(ui, t, child, add));
     let panel = shown.response.rect;
     with_level(ui.ctx(), &at, |l| l.panel = Some(panel));
     shown.inner
@@ -667,7 +760,7 @@ const MENU_W: f32 = 240.0;
 
 /// Where a menu remembers the width its rows need (its frame's ui), per language.
 fn width_key(ui: &Ui) -> Id {
-    ui.id().with(("menu_w", i18n::current().map(|l| l.code)))
+    ui.scope_id().with(("menu_w", i18n::current().map(|l| l.code)))
 }
 
 /// A row needs `w`: the menu widens to it from the next frame on.
@@ -730,12 +823,12 @@ pub fn open_main_menu(ctx: &egui::Context, top: &str) {
 
 /// The context menu's area (and menu tree).
 fn ctx_menu_id() -> Id {
-    Id::new("ctx_menu")
+    Id::unique("ctx_menu")
 }
 
 /// The main menu's area.
 pub fn main_menu_id() -> Id {
-    Id::new("main_menu")
+    Id::unique("main_menu")
 }
 
 /// Whether the pointer is over a menu (any foreground area).
@@ -757,6 +850,9 @@ const TOP_MENUS: &[&str] = &[
     tr_noop("Help"),
 ];
 
+/// Draw the main and context menu trees: forget closed/stale submenu state, apply
+/// control-channel Select-layer open/close, close on outside click or Escape, then draw the
+/// colour picker and palette popups.
 pub fn popups(app: &mut FigApp, ctx: &egui::Context) {
     let t = Tokens::get(ctx);
     // A closed menu forgets its open submenus (and a context menu opened somewhere else starts
@@ -765,7 +861,7 @@ pub fn popups(app: &mut FigApp, ctx: &egui::Context) {
         forget_tree(ctx, main_menu_id());
     }
     let ctx_at = app.ui.context_menu.as_ref().map(|(p, _)| *p);
-    let ctx_seen = Id::new("ctx_menu_at");
+    let ctx_seen = Id::unique("ctx_menu_at");
     if ctx.data(|d| d.get_temp::<Option<egui::Pos2>>(ctx_seen)) != Some(ctx_at) {
         ctx.data_mut(|d| d.insert_temp(ctx_seen, ctx_at));
         forget_tree(ctx, ctx_menu_id());
@@ -799,7 +895,9 @@ pub fn popups(app: &mut FigApp, ctx: &egui::Context) {
                 }
                 ui.add_space(6.0);
                 for top in TOP_MENUS {
-                    if submenu_at(ui, Id::new(("menu", *top)), top, tr(top), 12.0, false, &t, |ui| menu_level(app, ui, top).then_some(())).is_some() {
+                    if submenu_at(ui, Id::unique(("menu", *top)), top, tr(top), 12.0, false, &t, |ui| menu_level(app, ui, top).then_some(()))
+                        .is_some()
+                    {
                         close = true;
                     }
                 }
@@ -818,7 +916,7 @@ pub fn popups(app: &mut FigApp, ctx: &egui::Context) {
     }
     if let Some((pos, ids)) = app.ui.context_menu.clone() {
         if let Some(f) = ctx.memory(|m| m.focused()) {
-            a11y::popup(&mut app.ui.nav, f, Id::new("ctx_menu"));
+            a11y::popup(&mut app.ui.nav, f, Id::unique("ctx_menu"));
         }
         let mut close = false;
         let area = egui::Area::new(ctx_menu_id()).fixed_pos(pos).order(egui::Order::Foreground).constrain(true).show(ctx, |ui| {
@@ -861,11 +959,13 @@ pub fn popups(app: &mut FigApp, ctx: &egui::Context) {
                     .ok()
                     .filter(|doc| figcraft_engine::cmd::component::can_combine_variants(doc, &app.session.selection()))
                     .map(|_| i18n::command("component.combineVariants", "Combine as variants"));
+                let copy_link = i18n::command("edit.copyLink", "Copy link to selection");
                 let mut entries: Vec<(&str, &str)> = if has_sel {
                     vec![
                         (tr("Copy"), "edit.copy"),
                         (tr("Paste here"), "edit.paste"),
                         (tr("Paste to replace"), "edit.pasteReplace"),
+                        (tr("Copy as"), COPY_AS),
                         ("-", ""),
                         (tr("Bring to front"), "arrange.front"),
                         (tr("Bring forward"), "arrange.forward"),
@@ -889,10 +989,6 @@ pub fn popups(app: &mut FigApp, ctx: &egui::Context) {
                         ("-", ""),
                         (tr("Flip horizontal"), "object.flipH"),
                         (tr("Flip vertical"), "object.flipV"),
-                        ("-", ""),
-                        (tr("Copy as CSS"), "edit.copyAsCss"),
-                        (tr("Copy as SVG"), "edit.copyAsSvg"),
-                        (tr("Copy as PNG"), "edit.copyAsPng"),
                         ("-", ""),
                         (tr("Delete"), "edit.delete"),
                     ]
@@ -932,6 +1028,29 @@ pub fn popups(app: &mut FigApp, ctx: &egui::Context) {
                         separator(ui);
                         continue;
                     }
+                    if *id == COPY_AS {
+                        let copy_items = [
+                            (tr("Copy as CSS"), "edit.copyAsCss"),
+                            (tr("Copy as SVG"), "edit.copyAsSvg"),
+                            (tr("Copy as PNG"), "edit.copyAsPng"),
+                            (&*copy_link, "edit.copyLink"),
+                        ];
+                        let picked = submenu(ui, COPY_AS, label, &t, |ui| {
+                            let mut picked = None;
+                            for (label, id) in copy_items {
+                                let sc = crate::shortcuts::shortcut(id).unwrap_or("");
+                                if item(ui, label, sc, available(id), false, &t) {
+                                    picked = Some(id);
+                                }
+                            }
+                            picked
+                        });
+                        if let Some(id) = picked {
+                            invoke(app, id);
+                            close = true;
+                        }
+                        continue;
+                    }
                     let sc = crate::shortcuts::shortcut(id).unwrap_or("");
                     if item(ui, label, sc, available(id), false, &t) {
                         if *id == "edit.paste" {
@@ -945,11 +1064,15 @@ pub fn popups(app: &mut FigApp, ctx: &egui::Context) {
                 }
             });
         });
-        let clicked_outside = ctx.input(|i| i.pointer.any_pressed()) && !area.response.hovered() && !over_menu(ctx);
+        // The press of a tap that opened the menu (press and release in one frame) is spared.
+        let fresh = !std::mem::replace(&mut app.ui.context_menu_shown, true);
+        let clicked_outside = !fresh && ctx.input(|i| i.pointer.any_pressed()) && !area.response.hovered() && !over_menu(ctx);
         if close || clicked_outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             app.ui.context_menu = None;
             forget_tree(ctx, ctx_menu_id());
         }
+    } else {
+        app.ui.context_menu_shown = false;
     }
     crate::colorpicker::show(app, ctx);
     palette(app, ctx);
@@ -958,8 +1081,12 @@ pub fn popups(app: &mut FigApp, ctx: &egui::Context) {
 /// The context menu's Select layer submenu (its key in the context menu's tree).
 const SELECT_LAYER: &str = "Select layer";
 
+/// The context menu's Copy as submenu: its key in the tree, and the marker row in the entries.
+const COPY_AS: &str = "Copy as";
+
+/// Stable egui id for the context menu's pending Select-layer open request.
 fn select_layer_ask_id() -> Id {
-    Id::new("ctx_select_layer_ask")
+    Id::unique("ctx_select_layer_ask")
 }
 
 /// Open (or close) the context menu's Select layer submenu (applied when the menu next draws).
@@ -988,7 +1115,7 @@ fn select_layer_menu(app: &mut FigApp, ui: &mut Ui, pos: egui::Pos2, t: &Tokens)
         return false;
     }
     let sel = ds.selection.clone();
-    let picked = submenu_at(ui, Id::new("ctx_select_layer"), SELECT_LAYER, tr("Select layer"), 4.0, true, t, |ui| {
+    let picked = submenu_at(ui, Id::unique("ctx_select_layer"), SELECT_LAYER, tr("Select layer"), 4.0, true, t, |ui| {
         let mut picked = None;
         for (id, depth, name) in &layers {
             if indented_item(ui, name, "", true, sel.contains(id), 12.0 * (*depth).min(8) as f32, t) {
@@ -1032,7 +1159,7 @@ fn palette(app: &mut FigApp, ctx: &egui::Context) {
     let t = Tokens::get(ctx);
     // Same centre and width as the toolbar pill (it centres on the canvas, not the window),
     // floating 8 px above it. Fixed size: switching tabs never resizes the panel.
-    let bar_w = crate::toolbar::main_width();
+    let bar_w = crate::toolbar::bar_width(app);
     let bar = crate::toolbar::pill_rect(app.canvas.rect, bar_w);
     let area = Rect::from_min_max(pos2(bar.min.x, bar.min.y - 8.0 - (PALETTE_H + 16.0)), pos2(bar.max.x, bar.min.y - 8.0));
     let mut run: Option<String> = None;
@@ -1054,7 +1181,7 @@ fn palette(app: &mut FigApp, ctx: &egui::Context) {
         i.count_and_consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) as i64
             - i.count_and_consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) as i64
     });
-    egui::Area::new(Id::new("palette")).fixed_pos(area.min).order(egui::Order::Foreground).show(ctx, |ui| {
+    egui::Area::new(Id::unique("palette")).fixed_pos(area.min).order(egui::Order::Foreground).show(ctx, |ui| {
         egui::Frame::NONE
             .fill(t.panel)
             .corner_radius(CornerRadius::same(13))

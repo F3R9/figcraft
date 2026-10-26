@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use egui::{Id, Ui};
 use figcraft_color::Color;
-use figcraft_doc::{Document, NodeId, StyleKind};
-use figcraft_engine::selection_colors::{PaintTarget, SelectionColor, collect};
+use figcraft_doc::{Document, NodeId, StyleKind, VariableType};
+use figcraft_engine::selection_colors::{PaintTarget, SelectionColor, bind_refusal, collect, in_scope};
 use serde_json::json;
 
 use crate::a11y::Tip;
@@ -24,8 +24,11 @@ struct Cache {
     colors: Arc<Vec<SelectionColor>>,
 }
 
+/// Return the cached selection colours when the document and selection match. During an
+/// interaction reuse an existing matching cache, or return an empty list without discovering
+/// colours; otherwise discover and cache them.
 fn colors(ui: &Ui, document: u64, doc: &Arc<Document>, ids: &[NodeId], interacting: bool) -> Arc<Vec<SelectionColor>> {
-    let key = Id::new("selection_colors_cache");
+    let key = Id::unique("selection_colors_cache");
     if let Some(cache) = ui.data(|d| d.get_temp::<Cache>(key))
         && cache.document == document
         && cache.ids == ids
@@ -49,6 +52,9 @@ pub(crate) fn open_picker(app: &mut FigApp, targets: Vec<PaintTarget>) {
     app.ui.picker = Some(PickerTarget::SelectionColor { targets, selection: ds.selection.clone(), document: ds.uid });
 }
 
+/// Draw the selection-colour groups (at least two): swatch opens the picker, hex and opacity
+/// edits, style/variable detach/apply/bind, and “select layers with this color”; disabled
+/// during an interaction.
 pub fn section(app: &mut FigApp, ui: &mut Ui, doc: &Arc<Document>, ids: &[NodeId]) {
     let Ok(ds) = app.session.ds() else { return };
     let interacting = ds.interaction.is_some();
@@ -79,7 +85,7 @@ pub fn section(app: &mut FigApp, ui: &mut Ui, doc: &Arc<Document>, ids: &[NodeId
                                 open_picker(app, group.targets.clone());
                             }
                         } else if let Some(color) = group.paint.solid_color() {
-                            if let Some(hex) = widgets::text_field_named(ui, ui.id().with("hex"), &color.to_hex(), width, tr("Color")) {
+                            if let Some(hex) = widgets::text_field_named(ui, ui.scope_id().with("hex"), &color.to_hex(), width, tr("Color")) {
                                 if let Some(color) = Color::from_hex(&hex) {
                                     let mut paint = group.paint.clone();
                                     paint.kind = figcraft_color::PaintKind::Solid { color: color.with_alpha(1.0) };
@@ -98,7 +104,7 @@ pub fn section(app: &mut FigApp, ui: &mut Ui, doc: &Arc<Document>, ids: &[NodeId
                             }
                         }
                         let alpha = format!("{}%", figcraft_doc::trim_num(f64::from(group.paint.opacity) * 100.0));
-                        if let Some(value) = widgets::text_field_named(ui, ui.id().with("opacity"), &alpha, 44.0, tr("Opacity"))
+                        if let Some(value) = widgets::text_field_named(ui, ui.scope_id().with("opacity"), &alpha, 44.0, tr("Opacity"))
                             && let Ok(value) = value.trim().trim_end_matches('%').parse::<f32>()
                             && value.is_finite()
                         {
@@ -106,24 +112,52 @@ pub fn section(app: &mut FigApp, ui: &mut Ui, doc: &Arc<Document>, ids: &[NodeId
                             paint.opacity = (value / 100.0).clamp(0.0, 1.0);
                             app.run("selection.setPaint", json!({"targets": group.targets, "paint": paint}));
                         }
-                        let styles = icons::button(ui, Icon::Styles, 24.0, false, tr("Color styles"));
-                        crate::right::menu_popup(&styles).show(|ui| {
-                            let mut any = false;
-                            for style in &doc.styles {
-                                if !matches!(style.kind, StyleKind::Paint { .. }) {
-                                    continue;
-                                }
-                                any = true;
-                                if crate::right::menu_item(ui, &style.name, "") {
-                                    app.run("selection.applyColorStyle", json!({"targets": group.targets, "style": style.id}));
-                                    app.ui.picker = None;
-                                    ui.close();
-                                }
+                        if linked_name.is_some() {
+                            let detach = if group.style.is_some() { tr("Detach style") } else { tr("Detach variable") };
+                            if icons::button(ui, Icon::Detach, 24.0, false, detach).clicked() {
+                                app.run("selection.detachColor", json!({"targets": group.targets}));
                             }
-                            if !any {
-                                widgets::label(ui, tr("No color styles"), t.text_secondary);
-                            }
-                        });
+                        } else {
+                            let styles = icons::button(ui, Icon::Styles, 24.0, false, tr("Color styles"));
+                            crate::right::menu_popup(&styles).show(|ui| {
+                                let mut any = false;
+                                for style in &doc.styles {
+                                    if !matches!(style.kind, StyleKind::Paint { .. }) {
+                                        continue;
+                                    }
+                                    any = true;
+                                    if crate::right::menu_item(ui, &style.name, "") {
+                                        app.run("selection.applyColorStyle", json!({"targets": group.targets, "style": style.id}));
+                                        app.ui.picker = None;
+                                        ui.close();
+                                    }
+                                }
+                                if !any {
+                                    widgets::label(ui, tr("No color styles"), t.text_secondary);
+                                }
+                                let variables: Vec<_> = doc
+                                    .variables
+                                    .variables
+                                    .iter()
+                                    .filter(|v| {
+                                        v.kind == VariableType::Color
+                                            && bind_refusal(doc, &group.targets, &v.id).is_none()
+                                            && in_scope(doc, &group.targets, &v.id)
+                                    })
+                                    .collect();
+                                if !variables.is_empty() {
+                                    ui.separator();
+                                    widgets::label(ui, tr("Color variables"), t.text_secondary);
+                                }
+                                for v in variables {
+                                    if crate::right::menu_item(ui, &v.name, "") {
+                                        app.run("selection.bindColorVariable", json!({"targets": group.targets, "variable": v.id}));
+                                        app.ui.picker = None;
+                                        ui.close();
+                                    }
+                                }
+                            });
+                        }
                         if icons::button(ui, Icon::Move, 24.0, false, tr("Select layers with this color")).clicked() {
                             app.run("selection.selectColor", json!({"targets": group.targets}));
                         }
@@ -221,10 +255,12 @@ mod tests {
         assert!(!p.frame(vec![]).iter().any(|(s, _)| s == "Selection colors"));
     }
 
+    /// Asserts the panel reuses cached colours through a live interaction and refreshes the cache
+    /// after the commit.
     #[test]
     fn panel_keeps_cached_colors_during_interaction_and_refreshes_after_commit() {
         let (mut p, a, _) = Panel::new();
-        let key = Id::new("selection_colors_cache");
+        let key = Id::unique("selection_colors_cache");
         let before = p.ctx.data(|d| d.get_temp::<Cache>(key)).unwrap();
         p.app.session.begin_interaction("Color").unwrap();
         for hex in ["#00ff00", "#ffff00", "#00ffff"] {
@@ -240,10 +276,12 @@ mod tests {
         assert!(!Arc::ptr_eq(&before.colors, &after.colors));
     }
 
+    /// Asserts no cached colours are discovered during an interaction, and cancelling restores
+    /// the panel with the original colours.
     #[test]
     fn panel_defers_discovery_without_a_matching_cache_during_interaction() {
         let (mut p, a, _) = Panel::new();
-        let key = Id::new("selection_colors_cache");
+        let key = Id::unique("selection_colors_cache");
         p.ctx.data_mut(|d| d.remove::<Cache>(key));
         p.app.session.begin_interaction("Color").unwrap();
         p.app.run("fill.set", json!({"id":a,"color":"#00ff00"}));
@@ -272,5 +310,46 @@ mod tests {
         assert!(texts.iter().any(|(s, _)| s == "0000FF"));
         let colors = collect(p.app.session.doc().unwrap(), &[a, b]);
         assert_eq!(colors.len(), 2);
+    }
+
+    #[test]
+    fn styles_menu_applies_a_color_variable_to_the_row() {
+        let (mut p, a, b) = Panel::new();
+        p.app.run("variable.createCollection", json!({"name":"Theme"}));
+        p.app.run("variable.create", json!({"collection":"Theme","name":"Accent","type":"color","value":"#00ff00"}));
+        p.app.run("variable.create", json!({"collection":"Theme","name":"Gap","type":"number","value":8}));
+        let red = p.frame(vec![]).into_iter().find(|(s, _)| s == "FF0000").unwrap().1;
+        p.click(Pos2::new(228.0, red.y));
+        let texts = p.frame(vec![]);
+        assert!(texts.iter().any(|(s, _)| s == "Color variables"));
+        assert!(!texts.iter().any(|(s, _)| s == "Gap"));
+        let accent = texts.iter().find(|(s, _)| s == "Accent").unwrap().1;
+        p.click(accent);
+        let doc = p.app.session.doc().unwrap();
+        assert_eq!(doc.node(a).unwrap().fills[0].solid_color().unwrap().to_hex(), "00FF00");
+        assert!(!doc.node(a).unwrap().bound.is_empty());
+        assert!(doc.node(b).unwrap().bound.is_empty());
+        assert!(p.app.ui.last_error.is_none());
+        assert!(p.frame(vec![]).iter().any(|(s, _)| s == "Accent"));
+    }
+
+    #[test]
+    fn a_linked_row_detaches_its_style_or_variable() {
+        let (mut p, a, b) = Panel::new();
+        p.app.run("style.create", json!({"type":"paint","name":"Brand","value":"#ff0000"}));
+        p.app.run("style.apply", json!({"id":a,"style":"Brand","target":"fill"}));
+        p.app.run("variable.createCollection", json!({"name":"Theme"}));
+        p.app.run("variable.create", json!({"collection":"Theme","name":"Accent","type":"color","value":"#0000ff"}));
+        p.app.run("variable.bind", json!({"id":b,"field":"fill","variable":"Accent"}));
+        for name in ["Brand", "Accent"] {
+            let row = p.frame(vec![]).into_iter().find(|(s, _)| s == name).unwrap().1;
+            p.click(Pos2::new(228.0, row.y));
+        }
+        let doc = p.app.session.doc().unwrap();
+        assert!(doc.node(a).unwrap().styles.fill.is_none());
+        assert!(doc.node(b).unwrap().bound.is_empty());
+        let texts = p.frame(vec![]);
+        assert!(texts.iter().any(|(s, _)| s == "FF0000") && texts.iter().any(|(s, _)| s == "0000FF"));
+        assert!(p.app.ui.last_error.is_none());
     }
 }

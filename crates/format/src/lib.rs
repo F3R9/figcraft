@@ -20,6 +20,7 @@
 pub mod fig;
 pub mod library;
 pub mod rest;
+pub mod sketch;
 pub mod thumbnail;
 
 pub use library::{is_valid_library_id, read_library, read_library_within};
@@ -190,11 +191,12 @@ pub struct Loaded {
     pub issues: Vec<String>,
     pub versions: Vec<Version>,
     pub branches: Vec<Branch>,
+    pub images_past_budget: usize,
 }
 
 impl From<Document> for Loaded {
     fn from(doc: Document) -> Self {
-        Self { doc, issues: Vec::new(), versions: Vec::new(), branches: Vec::new() }
+        Self { doc, issues: Vec::new(), versions: Vec::new(), branches: Vec::new(), images_past_budget: 0 }
     }
 }
 
@@ -341,6 +343,20 @@ pub(crate) fn put<W: Write + Seek>(
 ) -> Result<(), FormatError> {
     z.start_file(name, opts).map_err(io_err)?;
     z.write_all(bytes).map_err(io_err)
+}
+
+/// `files` (name, bytes; a `/` in a name makes a folder) as one zip archive: several exports
+/// delivered as a single download (#969).
+pub fn zip_files<'a>(files: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> Result<Vec<u8>, FormatError> {
+    let mut buf = std::io::Cursor::new(Vec::new());
+    {
+        let mut z = zip::ZipWriter::new(&mut buf);
+        for (name, bytes) in files {
+            put(&mut z, name, zip::write::SimpleFileOptions::default(), bytes)?;
+        }
+        z.finish().map_err(io_err)?;
+    }
+    Ok(buf.into_inner())
 }
 
 /// Add `doc` as a `document.json`-style member, serialized straight into the compressor.
@@ -494,8 +510,9 @@ pub(crate) fn load_within(bytes: &[u8], budget: ImageBudget) -> Result<Loaded, F
     let limit = document_limit(packed, bytes.len() as u64);
     let text = String::from_utf8(read_member(&mut z, "document.json", limit)?).map_err(|e| FormatError::Corrupt(e.to_string()))?;
     let (mut doc, mut issues, own_images) = parse_json(&text)?;
-    let (images, unread) = read_images(&mut z, own_images.as_ref(), budget);
-    report_lost_images(&mut issues, &unread, own_images.as_ref(), &images);
+    let ImagesRead { images, unread, past_budget } = read_images(&mut z, own_images.as_ref(), budget);
+    report_lost_images(&mut issues, &unread, &past_budget, own_images.as_ref(), &images);
+    let images_past_budget = past_budget.len();
     match library::read(&mut z, &images, u64::MAX) {
         Ok(lib) => doc.published = lib.map(Arc::new),
         Err(e) => issues.push(format!("the published library was skipped: {e}")),
@@ -513,30 +530,37 @@ pub(crate) fn load_within(bytes: &[u8], budget: ImageBudget) -> Result<Loaded, F
         .filter(|h| own_images.as_ref().is_some_and(|o| !o.contains(*h)))
         .collect();
     doc.images = images.into_iter().filter(|(h, _)| !history_only.contains(h)).collect();
-    Ok(Loaded { doc, issues, versions, branches })
+    Ok(Loaded { doc, issues, versions, branches, images_past_budget })
 }
 
 /// The archive's `images/` members by hash, within `budget`, and the ones that couldn't be read
 /// with why. The document's own images (`own`) are read first, so a file past the budget loses
 /// the images only its history uses before its own.
-fn read_images<R: Read + Seek>(
-    z: &mut zip::ZipArchive<R>,
-    own: Option<&BTreeSet<String>>,
-    budget: ImageBudget,
-) -> (BTreeMap<String, ImageData>, Vec<(String, FormatError)>) {
-    let mut hashes: Vec<String> = z.file_names().filter_map(|n| n.strip_prefix("images/")).map(str::to_string).collect();
+fn read_images<R: Read + Seek>(z: &mut zip::ZipArchive<R>, own: Option<&BTreeSet<String>>, budget: ImageBudget) -> ImagesRead {
+    let mut hashes: Vec<String> = z.file_names().filter_map(|n| n.strip_prefix("images/")).filter(|h| !h.is_empty()).map(str::to_string).collect();
     hashes.sort_by_key(|h| !own.is_some_and(|o| o.contains(h)));
     let mut images = BTreeMap::new();
     let mut unread = Vec::new();
+    // Member names that aren't plain hashes (`../x`, `a/b`) are never read, so never written back.
+    hashes.retain(|h| {
+        let ok = library::is_valid_hash(h);
+        if !ok {
+            unread.push((h.clone(), FormatError::Corrupt("its name isn't a valid image hash".to_string())));
+        }
+        ok
+    });
     let mut left = budget.bytes;
+    let mut past_budget = BTreeSet::new();
     for (i, hash) in hashes.into_iter().enumerate() {
         let name = format!("images/{hash}");
         if i >= budget.images {
+            past_budget.insert(hash.clone());
             unread.push((hash, FormatError::Corrupt(format!("the file has more than {} images", budget.images))));
             continue;
         }
         if z.by_name(&name).is_ok_and(|f| f.size() > left) {
             let mb = budget.bytes / (1024 * 1024);
+            past_budget.insert(hash.clone());
             unread.push((hash, FormatError::Corrupt(format!("the file's images together pass {mb} MB"))));
             continue;
         }
@@ -548,18 +572,22 @@ fn read_images<R: Read + Seek>(
             Err(e) => unread.push((hash, e)),
         }
     }
-    (images, unread)
+    ImagesRead { images, unread, past_budget }
+}
+
+struct ImagesRead {
+    images: BTreeMap<String, ImageData>,
+    unread: Vec<(String, FormatError)>,
+    past_budget: BTreeSet<String>,
 }
 
 /// Most lost images reported one by one (the rest as a count).
 const MAX_IMAGE_ISSUES: usize = 20;
 
-/// Report the images a file lost on loading: members that couldn't be read (damaged, too large)
-/// and images its document lists but the archive doesn't hold. They are left out, so saving the
-/// file again would drop them for good.
 fn report_lost_images(
     issues: &mut Vec<String>,
     unread: &[(String, FormatError)],
+    past_budget: &BTreeSet<String>,
     listed: Option<&BTreeSet<String>>,
     images: &BTreeMap<String, ImageData>,
 ) {
@@ -570,7 +598,11 @@ fn report_lost_images(
                 FormatError::Corrupt(m) | FormatError::Io(m) => m.clone(),
                 FormatError::Newer(v) => format!("format version {v}"),
             };
-            format!("image {hash} couldn't be read ({why}): it is left out, and saving this file again drops it")
+            if past_budget.contains(hash) {
+                format!("image {hash} couldn't be read ({why}): it is left out and stays in the file, which can't be saved over without losing it")
+            } else {
+                format!("image {hash} couldn't be read ({why}): it is left out, and saving this file again drops it")
+            }
         })
         .collect();
     let unread_hashes: BTreeSet<&str> = unread.iter().map(|(h, _)| h.as_str()).collect();

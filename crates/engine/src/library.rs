@@ -339,7 +339,7 @@ pub fn publish(doc: &Document, prev: Option<&PublishedLibrary>, sel: &Selection,
         .map(|v| v.id.as_str())
         .collect();
     let (bound, mode_colls) = used_variables(doc, &units);
-    let var_ids = alias_closure(&doc.variables, offered_vars.iter().map(|v| v.to_string()).chain(bound));
+    let var_ids = alias_closure(&doc.variables, offered_vars.iter().map(ToString::to_string).chain(bound));
     snap.variables.variables = doc.variables.variables.iter().filter(|v| var_ids.contains(&v.id)).cloned().collect();
     let coll_ids: BTreeSet<&str> = snap
         .variables
@@ -491,6 +491,11 @@ impl Cache {
                 None => Err(EngineError::Other(crate::library_server::NOT_FETCHED.into())),
             };
         }
+        // The path comes from a document: a network share would be contacted (and on Windows get
+        // the opener's credentials) by the stat below.
+        if !craft_docpath::is_local(path) {
+            return Err(EngineError::Other(format!("{path}: a library is opened only from this computer")));
+        }
         let stamp = stat(path);
         // Checked before the cache: the limit is the caller's.
         if let Ok(st) = &stamp
@@ -553,11 +558,18 @@ fn stat(_path: &str) -> std::result::Result<Stamp, String> {
     Err(NO_FILES.into())
 }
 
+/// A library read from a file or a server, with the modes chosen inside its instances marked when
+/// it was published before they were overrides ([`crate::components::mark_layer_modes`]).
+pub(crate) fn settled(mut lib: PublishedLibrary) -> PublishedLibrary {
+    crate::components::mark_layer_modes(Arc::make_mut(&mut lib.doc));
+    lib
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn read_file(path: &str) -> std::result::Result<PublishedLibrary, String> {
     let f = crate::file_access::open(path).map_err(|e| e.to_string())?;
     match figcraft_format::read_library(std::io::BufReader::new(f)) {
-        Ok(Some(lib)) => Ok(lib),
+        Ok(Some(lib)) => Ok(settled(lib)),
         Ok(None) => Err(format!("{path} has no published library: open it and publish it first (Libraries ▸ Publish library…)")),
         Err(e) => Err(format!("{path}: {e}")),
     }

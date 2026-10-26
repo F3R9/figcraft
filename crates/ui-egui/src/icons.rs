@@ -40,6 +40,7 @@ icons! {
     Pen,
     Pencil,
     Text,
+    TextOnPath,
     Comment,
     Actions,
     Chevron,
@@ -83,6 +84,11 @@ icons! {
     FlipH,
     FlipV,
     CornerRadius,
+    /// Individual corners: the rounded corner each field sets.
+    CornerTopLeft,
+    CornerTopRight,
+    CornerBottomRight,
+    CornerBottomLeft,
     Angle,
     IndependentCorners,
     /// Individual padding: a frame with one inward tick per side, each set alone.
@@ -193,6 +199,34 @@ icons! {
     LiveShared,
     /// A file of yours on a server that only you get into: a point inside a closed ring.
     LivePrivate,
+    /// A design file: a pen nib leaning to the left, its grip filled.
+    PenNib,
+    /// A board file (and the sticky note tool): a note with its bottom corner folded up.
+    Board,
+    /// Board templates: a board laid out in blocks, a note and lines of text. A table: a grid.
+    /// The table bar's rows and columns: a strip with a plus or a minus beyond its end.
+    Templates,
+    Table,
+    AddRow,
+    RemoveRow,
+    AddColumn,
+    RemoveColumn,
+    /// Board tools: a chisel-tipped marker; a broad highlighter over its band; a connector
+    /// between two boxes; shapes (a square behind a circle); a stamp (a badge with a check).
+    Marker,
+    Highlighter,
+    Connector,
+    /// A curved connector: the connector's two boxes joined by a quarter bend instead of a corner.
+    CurvedConnector,
+    Shapes,
+    Stamp,
+    /// Running a board session: a stopwatch (the timer), two bars (pause) and a ballot going
+    /// into a box (voting).
+    Timer,
+    Pause,
+    Vote,
+    /// A measurement: a dimension line with arrowheads between two end ticks.
+    Measure,
 }
 
 /// Points along a circular arc from angle `a0` to `a1` (radians, y down: increasing is clockwise).
@@ -543,6 +577,12 @@ fn draw(p: &P, icon: Icon) {
             p.line(11.5, 3.0, 11.5, 5.5);
             p.line(5.5, 12.5, 9.5, 12.5);
         }
+        TextOnPath => {
+            // A small T above the curve it follows.
+            p.line(4.5, 3.0, 11.5, 3.0);
+            p.line(8.0, 3.0, 8.0, 8.5);
+            p.poly(&[(2.0, 13.5), (5.0, 11.5), (8.0, 10.8), (11.0, 11.5), (14.0, 13.5)], false);
+        }
         Comment => {
             let mut b: Vec<(f32, f32)> = arc_pts(8.5, 7.5, 5.0, 2.75, TAU + 1.95).collect();
             b.push((2.5, 13.5));
@@ -708,7 +748,10 @@ fn draw(p: &P, icon: Icon) {
             p.poly(&[(3.5, 5.5), (12.5, 5.5), (12.5, 1.5)], true);
             p.fill(&[(3.0, 9.0), (13.0, 9.0), (13.0, 14.0)]);
         }
-        CornerRadius => p.corner(2.5, 2.5, 1.0, 1.0, 11.5, 6.0),
+        CornerRadius | CornerTopLeft => p.corner(2.5, 2.5, 1.0, 1.0, 11.5, 6.0),
+        CornerTopRight => p.corner(13.5, 2.5, -1.0, 1.0, 11.5, 6.0),
+        CornerBottomRight => p.corner(13.5, 13.5, -1.0, -1.0, 11.5, 6.0),
+        CornerBottomLeft => p.corner(2.5, 13.5, 1.0, -1.0, 11.5, 6.0),
         Angle => {
             // Two rays from a vertex, the arc between them marking the angle (all unhinted, so
             // the arc meets the rays at every size).
@@ -1118,6 +1161,108 @@ fn draw(p: &P, icon: Icon) {
             p.line(8.0, 6.0, 8.0, 9.5);
             p.dot(8.0, 11.5, 0.9);
         }
+        PenNib => {
+            // Drawn pointing down, then leant 35° to the left about the middle.
+            let (sin, cos) = (0.61f32, 0.79f32);
+            let at = |x: f32, y: f32| (8.0 + x * cos - y * sin, 8.0 + x * sin + y * cos);
+            let nib: Vec<(f32, f32)> = [(0.0, 6.5), (3.4, 1.0), (2.4, -2.5), (-2.4, -2.5), (-3.4, 1.0)].iter().map(|&(x, y)| at(x, y)).collect();
+            p.path(&nib, true);
+            let (a, b) = (at(0.0, 6.5), at(0.0, 2.0));
+            p.path(&[a, b], false);
+            let (dx, dy) = at(0.0, 0.6);
+            p.dot(dx, dy, 1.0);
+            let grip: Vec<(f32, f32)> = [(-2.4, -3.4), (2.4, -3.4), (2.4, -5.6), (-2.4, -5.6)].iter().map(|&(x, y)| at(x, y)).collect();
+            p.fill(&grip);
+        }
+        Board => {
+            p.poly(&[(2.5, 2.5), (13.5, 2.5), (13.5, 9.5), (9.5, 13.5), (2.5, 13.5)], true);
+            p.fill(&[(9.5, 13.5), (9.5, 9.5), (13.5, 9.5)]);
+            p.line(5.0, 6.5, 11.0, 6.5);
+            p.line(5.0, 9.5, 8.0, 9.5);
+        }
+        Templates => {
+            p.rect(1.5, 2.5, 14.5, 13.5, 1.5);
+            p.fill_rect(3.5, 4.5, 7.5, 8.5, 0.5);
+            p.line(9.5, 5.5, 12.5, 5.5);
+            p.line(9.5, 7.5, 12.5, 7.5);
+            p.line(3.5, 11.0, 12.5, 11.0);
+        }
+        Table => {
+            p.rect(1.5, 2.5, 14.5, 13.5, 1.0);
+            p.line(1.5, 6.5, 14.5, 6.5);
+            p.line(1.5, 10.0, 14.5, 10.0);
+            p.line(6.0, 2.5, 6.0, 13.5);
+            p.line(10.0, 2.5, 10.0, 13.5);
+        }
+        AddRow | RemoveRow => {
+            p.rect(1.5, 2.5, 14.5, 8.5, 1.0);
+            p.line(8.0, 2.5, 8.0, 8.5);
+            p.line(5.5, 12.5, 10.5, 12.5);
+            if icon == AddRow {
+                p.line(8.0, 10.0, 8.0, 15.0);
+            }
+        }
+        AddColumn | RemoveColumn => {
+            p.rect(2.5, 1.5, 8.5, 14.5, 1.0);
+            p.line(2.5, 8.0, 8.5, 8.0);
+            p.line(10.0, 8.0, 15.0, 8.0);
+            if icon == AddColumn {
+                p.line(12.5, 5.5, 12.5, 10.5);
+            }
+        }
+        Marker => {
+            p.poly(&[(3.0, 13.0), (3.0, 10.5), (10.0, 3.5), (12.5, 6.0), (5.5, 13.0)], true);
+            p.line(8.5, 5.0, 11.0, 7.5);
+            p.fill(&[(2.0, 14.0), (2.0, 11.5), (4.5, 14.0)]);
+        }
+        Highlighter => {
+            p.poly(&[(4.0, 10.0), (10.5, 3.5), (13.5, 6.5), (7.0, 13.0)], true);
+            p.poly(&[(4.0, 10.0), (2.5, 12.5), (4.5, 12.5), (7.0, 13.0)], false);
+            p.fill_rect(1.0, 14.0, 15.0, 15.5, 0.0);
+        }
+        Connector => {
+            p.rect(1.5, 1.5, 6.5, 6.5, 1.0);
+            p.rect(9.5, 9.5, 14.5, 14.5, 1.0);
+            p.poly(&[(6.5, 4.0), (12.0, 4.0), (12.0, 9.0)], false);
+            p.head((12.0, 9.0), FRAC_PI_2, 2.4);
+        }
+        CurvedConnector => {
+            p.rect(1.5, 1.5, 6.5, 6.5, 1.0);
+            p.rect(9.5, 9.5, 14.5, 14.5, 1.0);
+            p.arc(6.5, 9.0, 5.5, -FRAC_PI_2, 0.0);
+            p.head((12.0, 9.0), FRAC_PI_2, 2.4);
+        }
+        Shapes => {
+            p.rect(1.5, 5.5, 9.5, 13.5, 1.0);
+            p.circle(10.5, 5.5, 4.0);
+        }
+        Stamp => {
+            p.circle(8.0, 8.0, 6.0);
+            p.poly(&[(5.0, 8.3), (7.2, 10.5), (11.0, 6.0)], false);
+        }
+        Timer => {
+            p.circle(8.0, 9.0, 5.5);
+            p.line(8.0, 9.0, 8.0, 6.0);
+            p.line(6.0, 1.5, 10.0, 1.5);
+            p.line(8.0, 1.5, 8.0, 3.5);
+            p.line(12.0, 4.0, 13.5, 2.5);
+        }
+        Pause => {
+            p.fill_rect(4.0, 3.0, 6.5, 13.0, 0.5);
+            p.fill_rect(9.5, 3.0, 12.0, 13.0, 0.5);
+        }
+        Vote => {
+            p.rect(2.5, 8.5, 13.5, 13.5, 1.0);
+            p.poly(&[(5.5, 8.5), (5.5, 2.5), (10.5, 2.5), (10.5, 8.5)], false);
+            p.poly(&[(6.6, 5.6), (7.7, 6.7), (9.4, 4.6)], false);
+        }
+        Measure => {
+            p.line(2.5, 4.0, 2.5, 12.0);
+            p.line(13.5, 4.0, 13.5, 12.0);
+            p.line(3.0, 8.0, 13.0, 8.0);
+            p.poly(&[(5.5, 5.5), (3.0, 8.0), (5.5, 10.5)], false);
+            p.poly(&[(10.5, 5.5), (13.0, 8.0), (10.5, 10.5)], false);
+        }
         Logo => {
             // FigCraft's own mark: the curled tail of the chameleon on the app icon. One bold
             // stroke: a shaft along the bottom, then three half turns, each tighter than the last.
@@ -1162,10 +1307,50 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, size: f32, active: bool, tooltip: &
     resp
 }
 
+/// The mark of a file of `kind` on tabs and file rows: a pen nib for design files, a sticky note
+/// for boards.
+pub fn file_mark(kind: figcraft_doc::FileKind) -> Icon {
+    match kind {
+        figcraft_doc::FileKind::Design => Icon::PenNib,
+        figcraft_doc::FileKind::Board => Icon::Board,
+    }
+}
+
+/// SVG path data outlines on a `size`-unit box, painted into `rect`: each part filled, or
+/// stroked `width` box units wide. Board shapes and stamp marks are drawn this way in the UI from
+/// the same outlines the canvas has.
+pub fn paint_outlines(painter: &Painter, rect: Rect, size: f64, parts: &[(&figcraft_geom::BezPath, bool)], color: Color32, width: f32) {
+    let s = rect.width().min(rect.height()) / size as f32;
+    let px = 1.0 / painter.ctx().pixels_per_point();
+    let o = rect.center() - Vec2::splat(size as f32 * s / 2.0);
+    let p = P { painter, o, s, px, stroke: Stroke::new((width * s).max(px), color), color };
+    for (path, filled) in parts {
+        let mut sub: Vec<(f32, f32)> = Vec::new();
+        let flush = |sub: &mut Vec<(f32, f32)>, closed: bool| {
+            if sub.len() >= 2 {
+                if *filled { p.fill(sub) } else { p.path(sub, closed) }
+            }
+            sub.clear();
+        };
+        let mut closed = false;
+        figcraft_geom::kurbo::flatten(path.iter(), 0.25, |el| match el {
+            figcraft_geom::kurbo::PathEl::MoveTo(q) => {
+                flush(&mut sub, closed);
+                closed = false;
+                sub.push((q.x as f32, q.y as f32));
+            }
+            figcraft_geom::kurbo::PathEl::LineTo(q) => sub.push((q.x as f32, q.y as f32)),
+            figcraft_geom::kurbo::PathEl::ClosePath => closed = true,
+            _ => {}
+        });
+        flush(&mut sub, closed);
+    }
+}
+
 /// Every icon at the sizes the UI uses, labelled: for reviewing the set (`ui.set {iconGallery}`).
 pub fn gallery(ctx: &egui::Context) {
     let t = crate::theme::Tokens::get(ctx);
-    egui::Area::new(egui::Id::new("icon_gallery")).order(egui::Order::Foreground).fixed_pos(Pos2::ZERO).show(ctx, |ui| {
+    egui::Area::new(egui::Id::unique("icon_gallery")).order(egui::Order::Foreground).fixed_pos(Pos2::ZERO).show(ctx, |ui| {
         let screen = ctx.content_rect();
         let (r, _) = ui.allocate_exact_size(screen.size(), egui::Sense::click());
         ui.painter().rect_filled(r, 0.0, t.panel);
@@ -1263,7 +1448,7 @@ mod tests {
         let mut u = crate::layers_drag_tests::Ui::new(s);
         u.frame(vec![]);
         let shapes = u.frame_output(vec![]).shapes;
-        let lead = |name: &str| u.ctx.read_response(egui::Id::new(name).with("lead")).map(|r| r.rect).unwrap_or_else(|| panic!("{name} is shown"));
+        let lead = |name: &str| u.ctx.read_response(egui::Id::unique(name).with("lead")).map(|r| r.rect).unwrap_or_else(|| panic!("{name} is shown"));
         let (rotation, radius) = (marks(&shapes, lead("pos_rot")), marks(&shapes, lead("ap_rad")));
         assert!(!rotation.is_empty() && !radius.is_empty(), "both draw an icon");
         assert_ne!(rotation, radius);
@@ -1322,5 +1507,19 @@ mod tests {
         };
         let inside = (0..h.len()).all(|i| side(i) >= 0.0) || (0..h.len()).all(|i| side(i) <= 0.0);
         assert!(inside, "the handle covers the blade's base at {base:?}");
+    }
+
+    /// Each corner's icon shows its own corner: no two of the four draw alike.
+    #[test]
+    fn corner_icons_differ() {
+        let drawn: Vec<String> = [Icon::CornerTopLeft, Icon::CornerTopRight, Icon::CornerBottomRight, Icon::CornerBottomLeft]
+            .iter()
+            .map(|&icon| format!("{:?}", shapes_at_32(icon)))
+            .collect();
+        for (i, a) in drawn.iter().enumerate() {
+            for b in &drawn[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
     }
 }

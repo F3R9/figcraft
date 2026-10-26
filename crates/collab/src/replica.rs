@@ -236,6 +236,23 @@ impl Replica {
                 if node.is_page() != matches!(kind, NodeKind::Page { .. }) {
                     return Err(Error::Invalid("a node can't become or stop being a page".into()));
                 }
+                // A compact metadata edit must not replace newer concurrent characters or
+                // typography while retaining geometry from a different text revision.
+                if value.0.get("unchangedAppearance").and_then(serde_json::Value::as_bool) == Some(true)
+                    && let (NodeKind::Text(current), NodeKind::Text(metadata)) = (&mut node.kind, &kind)
+                {
+                    current.style.link = metadata.style.link.clone();
+                    current.style.style_id = metadata.style.style_id.clone();
+                    if current.characters == metadata.characters {
+                        for run in &mut current.runs {
+                            if let Some(m) = metadata.runs.iter().find(|m| m.start == run.start && m.end == run.end) {
+                                run.style.link = m.style.link.clone();
+                                run.style.style_id = m.style.style_id.clone();
+                            }
+                        }
+                    }
+                    return Ok(Relist::No);
+                }
                 node.kind = kind;
                 Ok(Relist::No)
             }

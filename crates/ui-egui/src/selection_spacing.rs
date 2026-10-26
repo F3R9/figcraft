@@ -24,9 +24,11 @@ struct LayoutCache {
     reorder: Option<Arc<ReorderLayout>>,
 }
 
+/// Return one cached spacing/reorder calculation per document, page, selection and frame,
+/// refreshing next frame after an edit and reusing an unchanged document snapshot.
 fn layout(app: &FigApp, ctx: &egui::Context, ids: &[NodeId]) -> Arc<SelectionSpacing> {
     let Ok(ds) = app.session.ds() else { return Arc::new(SelectionSpacing::default()) };
-    let key = Id::new("selection_spacing_layout");
+    let key = Id::unique("selection_spacing_layout");
     let frame = ctx.cumulative_frame_nr();
     if let Some(mut cache) = ctx.data(|d| d.get_temp::<LayoutCache>(key))
         && cache.document == ds.uid
@@ -52,13 +54,15 @@ fn layout(app: &FigApp, ctx: &egui::Context, ids: &[NodeId]) -> Arc<SelectionSpa
     });
     layout
 }
+/// Return the cached reorder layout, first ensuring the shared layout cache is populated.
 fn reorder_layout(app: &FigApp, ctx: &egui::Context, ids: &[NodeId]) -> Option<Arc<ReorderLayout>> {
     layout(app, ctx, ids);
-    ctx.data(|d| d.get_temp::<LayoutCache>(Id::new("selection_spacing_layout"))).and_then(|c| c.reorder)
+    ctx.data(|d| d.get_temp::<LayoutCache>(Id::unique("selection_spacing_layout"))).and_then(|c| c.reorder)
 }
 
+/// Stable egui id for spacing/reorder drag state.
 fn drag_id() -> Id {
-    Id::new("selection_spacing_drag")
+    Id::unique("selection_spacing_drag")
 }
 
 /// The reorder ring of a layer with world bounds `b`: its centre on screen and hit radius. The
@@ -107,6 +111,8 @@ fn start_drag(app: &mut FigApp, ctx: &egui::Context, ids: Vec<NodeId>, p: Pos2, 
     }
 }
 
+/// Draw horizontal and vertical spacing fields, running `arrange.spacing` with
+/// `fromGesture`.
 pub fn panel(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId]) {
     let layout = layout(app, ui.ctx(), ids);
     if layout.horizontal.is_none() && layout.vertical.is_none() {
@@ -120,7 +126,7 @@ pub fn panel(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId]) {
             (&layout.vertical, "vertical", Icon::DistributeV, tr("Vertical spacing")),
         ] {
             let Some(axis) = axis else { continue };
-            let edit = widgets::number_field(ui, Id::new(("selection_spacing", key)), Lead::Icon(icon, tip), axis.value, "", col, 1.0);
+            let edit = widgets::number_field(ui, Id::unique(("selection_spacing", key)), Lead::Icon(icon, tip), axis.value, "", col, 1.0);
             app.field_run(edit, "arrange.spacing", |v| json!({"ids":ids,key:v.clamp(-1e6,1e6),"fromGesture":true}));
         }
     });

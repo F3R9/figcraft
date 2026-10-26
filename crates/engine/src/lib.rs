@@ -13,6 +13,10 @@ pub mod al_keys;
 pub mod annotations;
 pub mod arc_handles;
 pub mod background;
+pub mod batch;
+pub mod board;
+pub mod board_table;
+pub mod board_templates;
 pub mod booleans;
 pub mod branches;
 pub mod catalog;
@@ -22,6 +26,8 @@ pub mod codegen;
 pub mod collab;
 pub mod component_codegen;
 pub mod components;
+pub mod datafill;
+pub mod dev_measurements;
 pub mod dev_resources;
 pub mod devcompare;
 pub mod devinspect;
@@ -57,13 +63,17 @@ pub mod snap;
 pub mod style_vars;
 pub mod synthetic;
 pub mod synthetic_ds;
+pub mod tailwind;
 pub mod templates;
 pub mod textedit;
+pub mod textfit;
 pub mod textpreview;
+pub mod token_roles;
 pub mod tools;
 pub mod vectoredit;
 pub mod widgets;
 
+pub use batch::{BatchScope, BatchStep};
 pub use cmd::{CommandSpec, all_commands, find_command};
 pub use figcraft_collab;
 pub use figcraft_doc as doc;
@@ -109,51 +119,22 @@ impl From<figcraft_doc::DocError> for EngineError {
     }
 }
 
+impl EngineError {
+    /// This error from step `step` of a batch, saying so in its message; the kind stays (errors
+    /// without a message stay as they are).
+    fn at_step(self, step: usize) -> Self {
+        match self {
+            EngineError::BadParams { cmd, msg } => EngineError::BadParams { cmd, msg: format!("step {step}: {msg}") },
+            EngineError::Other(msg) => EngineError::Other(format!("step {step}: {msg}")),
+            e => e,
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, EngineError>;
 
 pub fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
     EngineError::BadParams { cmd: cmd.to_string(), msg: msg.into() }
-}
-
-/// Deepest params nesting `resolve_step_refs` walks before giving up.
-const STEP_REF_MAX_DEPTH: usize = 64;
-
-/// Replace every `{"$step": n}` / `{"$step": n, "field": "…"}` in `v` with that field (default
-/// `id`) of `results[n]`, the result of an earlier batch step.
-fn resolve_step_refs(v: &Value, results: &[Value], step: usize, depth: usize) -> Result<Value> {
-    if depth > STEP_REF_MAX_DEPTH {
-        return Err(bad("command.batch", format!("step {step}: params nest deeper than {STEP_REF_MAX_DEPTH} levels")));
-    }
-    match v {
-        Value::Object(o) if o.contains_key("$step") => {
-            if let Some(k) = o.keys().find(|k| *k != "$step" && *k != "field") {
-                return Err(bad("command.batch", format!("step {step}: a `$step` reference takes only `field`, not `{k}`")));
-            }
-            let n = o
-                .get("$step")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| bad("command.batch", format!("step {step}: `$step` must be a step index (0, 1, …)")))?;
-            let field = match o.get("field") {
-                None => "id",
-                Some(Value::String(f)) => f.as_str(),
-                Some(_) => return Err(bad("command.batch", format!("step {step}: `field` must be a string"))),
-            };
-            let Some(result) = usize::try_from(n).ok().and_then(|n| results.get(n)) else {
-                let range = if step == 0 { "there is none before step 0".to_string() } else { format!("0 to {}", step - 1) };
-                return Err(bad("command.batch", format!("step {step}: `$step` {n} must be an earlier step ({range})")));
-            };
-            result.get(field).cloned().ok_or_else(|| bad("command.batch", format!("step {step}: step {n}'s result has no `{field}`")))
-        }
-        Value::Object(o) => {
-            let mut out = serde_json::Map::with_capacity(o.len());
-            for (k, x) in o {
-                out.insert(k.clone(), resolve_step_refs(x, results, step, depth + 1)?);
-            }
-            Ok(Value::Object(out))
-        }
-        Value::Array(a) => a.iter().map(|x| resolve_step_refs(x, results, step, depth + 1)).collect::<Result<Vec<_>>>().map(Value::Array),
-        _ => Ok(v.clone()),
-    }
 }
 
 /// One undo step.
@@ -324,6 +305,17 @@ pub struct TextEdit {
     pub anchor: usize,
     /// The node was created by this edit (deleted if left empty).
     pub created: bool,
+    /// Identity of this editing session (`textedit::begin` assigns a fresh one).
+    ///
+    /// The IME owner is `(document uid, node)`, which stays the same through ordinary edits
+    /// and caret moves; this token changes only when editing is started again, so an IME
+    /// context is never silently inherited by a replaced target that reuses the same node.
+    ///
+    /// It is deliberately not serialized: current consumers only inspect a live session. A
+    /// serialized `TextEdit` restored from data would get zero here, so it must not be restored
+    /// into a live editor without minting (or otherwise invalidating) a new session.
+    #[serde(default, skip_serializing)]
+    pub editing_session: u64,
     /// An IME composition in progress, shown inline at the caret; the document gets it on commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preedit: Option<Preedit>,
@@ -382,6 +374,7 @@ pub struct DocState {
     /// The last duplicate while its copies are the selection: Duplicate repeats its offset (see
     /// [`cmd::edit::Duplicated`]; not saved).
     pub(crate) last_duplicate: Option<cmd::edit::Duplicated>,
+    images_left_in_file: Option<(String, usize)>,
 }
 
 /// A version shown on the canvas in place of the document: read-only until it's restored or the
@@ -402,7 +395,8 @@ pub const PREVIEW_READ_ONLY: &str = "you're viewing an earlier version: restore 
 
 /// Commands that first end a version preview: they act on the document itself. Saving does so
 /// only with a native destination; export copies and pending format choices keep the preview.
-const ENDS_PREVIEW: &[&str] = &["file.save", "file.saveAs", "file.close", "file.revert", "file.saveVersion", "file.duplicate", "version.restore"];
+const ENDS_PREVIEW: &[&str] =
+    &["file.save", "file.saveAs", "file.markSaved", "file.close", "file.revert", "file.saveVersion", "file.duplicate", "version.restore"];
 
 static NEXT_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -413,6 +407,7 @@ impl DocState {
         }
         doc.link_layer_text_styles();
         cmd::styles::apply_paint_bindings_on_load(&mut doc);
+        components::mark_layer_modes(&mut doc);
         figcraft_text::appearance::capture(&mut doc, None);
         // Initial import settlement belongs to the saved baseline, not the user's first edit.
         let page = doc.current_page.filter(|p| doc.pages.contains(p)).or_else(|| doc.first_page()).unwrap_or(NodeId(0));
@@ -443,9 +438,19 @@ impl DocState {
             rotation_origin: None,
             view_from_prefs: false,
             last_duplicate: None,
+            images_left_in_file: None,
         };
         st.zoom_to_fit();
         st
+    }
+
+    pub fn with_images_left_in_file(mut self, path: &str, count: usize) -> Self {
+        self.images_left_in_file = (count > 0).then(|| (path.to_string(), count));
+        self
+    }
+
+    pub fn images_lost_saving_to(&self, path: &str) -> Option<usize> {
+        self.images_left_in_file.as_ref().filter(|(file, _)| file_access::same_file(file, path)).map(|(_, count)| *count)
     }
 
     /// The selected ruler guide (its owner and index): it counts while no layer is selected and it
@@ -686,6 +691,9 @@ pub struct Prefs {
     /// The Getting started tips on the home screen were closed (Help ▸ Getting started shows them
     /// again).
     pub getting_started_dismissed: bool,
+    /// A prototype's Open link goes to a website without first telling the viewer that it leaves
+    /// the prototype (the notice's "Don't show this again"; `proto.linkNotice` shows it again).
+    pub link_notice_skipped: bool,
     /// How each home screen section shows its files, by section id (`"recents"`): `"grid"` (cards
     /// with the picture each file carries) or `"list"` (a table). Missing: the grid.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -735,6 +743,7 @@ impl Default for Prefs {
             recent_files: Vec::new(),
             online_files: Vec::new(),
             getting_started_dismissed: false,
+            link_notice_skipped: false,
             home_views: BTreeMap::new(),
             home_sort: "modified".into(),
             home_order: "desc".into(),
@@ -760,11 +769,21 @@ pub struct Clipboard {
     pub images: std::collections::BTreeMap<String, figcraft_doc::ImageData>,
     /// Copied properties (Copy properties / Paste properties).
     pub props: Option<Value>,
+    /// A copied fill or stroke row (`fill.copy`, `stroke.copy`): whether it's a fill, and the paint.
+    pub paint: Option<(bool, figcraft_color::Paint)>,
+    /// The stroke settings (`weight`, alignment, sides…) copied with a stroke's paint.
+    pub stroke: Option<figcraft_doc::StrokeProps>,
+    /// A copied effect row (`effect.copy`).
+    pub effect: Option<figcraft_doc::Effect>,
     /// The page-space bounds of the copied selection.
     pub bounds: Option<figcraft_geom::Rect>,
     pub source_doc: u64,
     /// Copied component/set roots, excluding cuts and originals discarded by undo (ids are reused).
     pub copied_components: std::collections::BTreeSet<NodeId>,
+    /// Monotonic generation of the copied layers (contents, images, bounds and source). A UI
+    /// clipboard mirror records it, so a later programmatic copy that never touched the system
+    /// clipboard is not mistaken for the user's own copy just because the text still matches.
+    pub layers_generation: u64,
     /// The document copied from (pastes into other files follow its mains) and its file path.
     pub source: Option<Arc<Document>>,
     pub source_path: Option<String>,
@@ -937,6 +956,7 @@ impl Session {
     /// as it was.
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
         let spec = find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
+        board::refuse_on_board(self, id)?;
         // Revert replaces the document's uid: refuse before ending previews or syncing branches.
         if id == "file.revert" && self.live().doc_uid.is_some() {
             return Err(EngineError::Disabled(id.into(), "leave the live session before reverting to the saved file".into()));
@@ -960,6 +980,8 @@ impl Session {
             ds.end_preview();
         }
         let before = self.ds().ok().map(|d| (d.doc.clone(), d.selection.clone(), d.page, d.uid));
+        // Cut and copy write the clipboard before a later check can refuse the command.
+        let clipboard_before = self.clipboard.clone();
         let result = guard::run(id, || (spec.run)(self, params))
             .and_then(|v| self.check_instance_structure(id, &before).map(|()| v))
             .and_then(|v| self.check_preview(id, &before).map(|()| v))
@@ -993,6 +1015,7 @@ impl Session {
                     ds.selection = sel;
                     ds.page = page;
                 }
+                self.clipboard = clipboard_before;
             }
         }
         result
@@ -1029,6 +1052,10 @@ impl Session {
                 continue;
             }
             if !figcraft_text::appearance::has_saved(a, Some(b.width), Some(b.height)) {
+                continue;
+            }
+            if figcraft_text::appearance::has_saved(t, Some(n.width), Some(n.height)) {
+                // Metadata-only edits do not need installed fonts or new outlines.
                 continue;
             }
             let mut a = a.clone();
@@ -1237,8 +1264,9 @@ impl Session {
         }
         let Some(e) = ds.history.undo.pop() else { return Ok(false) };
         let redo = HistoryEntry { label: e.label.clone(), doc: ds.doc.clone(), selection: ds.selection.clone(), page: ds.page };
-        ds.history.redo.push(redo);
         ds.doc = e.doc;
+        cmd::facilitate::keep(&redo.doc, &mut ds.doc);
+        ds.history.redo.push(redo);
         ds.selection = e.selection;
         if ds.doc.pages.contains(&e.page) {
             ds.page = e.page;
@@ -1273,8 +1301,9 @@ impl Session {
         }
         let Some(e) = ds.history.redo.pop() else { return Ok(false) };
         let undo = HistoryEntry { label: e.label.clone(), doc: ds.doc.clone(), selection: ds.selection.clone(), page: ds.page };
-        ds.history.undo.push(undo);
         ds.doc = e.doc;
+        cmd::facilitate::keep(&undo.doc, &mut ds.doc);
+        ds.history.undo.push(undo);
         ds.selection = e.selection;
         if ds.doc.pages.contains(&e.page) {
             ds.page = e.page;
@@ -1290,28 +1319,31 @@ impl Session {
     }
 
     /// Run several commands as one undo step. A param value `{"$step": n}` is replaced by the `id`
-    /// in the result of the earlier step `n` (`{"$step": n, "field": "…"}` picks another field),
-    /// so a step can target a layer that an earlier step of the same batch created. Any object
-    /// with a `$step` key in a step's params is such a reference, except inside a nested
-    /// `command.batch` step: its references are to its own steps.
-    pub fn batch(&mut self, label: &str, cmds: &[(String, Value)]) -> Result<Vec<Value>> {
+    /// in the result of the earlier step `n`, and `{"$ref": "name"}` by the `id` in the result of
+    /// the earlier step whose `as` is `name`; either takes a `field`, a key or slash path (`ids/0`)
+    /// into that result. So a step can target a layer that an earlier step of the same batch
+    /// created. Any object with a `$step` or `$ref` key in a step's params is such a reference,
+    /// except inside a nested `command.batch` step: its references are to its own steps.
+    pub fn batch(&mut self, label: &str, steps: &[BatchStep]) -> Result<Vec<Value>> {
+        let mut scope = BatchScope::new(steps)?;
         self.grouped(label, |s| {
-            let mut results: Vec<Value> = Vec::with_capacity(cmds.len());
-            for (step, (id, p)) in cmds.iter().enumerate() {
-                let v = s.batch_step(&results, step, id, p)?;
-                results.push(v);
+            for step in steps {
+                s.batch_step(&mut scope, &step.command, &step.params)?;
             }
-            Ok(results)
+            Ok(scope.into_results())
         })
     }
 
-    /// One step of a batch: `{"$step": n}` in `params` resolves against `results` (the results of
-    /// the steps before it), then the command runs. [`Session::batch`] runs a list of these as one
-    /// undo step; a caller with its own list — the CLI's script runner — uses this so its steps
-    /// resolve `$step` the same way, inside its own [`Session::grouped`].
-    pub fn batch_step(&mut self, results: &[Value], step: usize, cmd: &str, params: &Value) -> Result<Value> {
-        let p = if cmd == "command.batch" { params.clone() } else { resolve_step_refs(params, results, step, 0)? };
-        self.execute(cmd, &p)
+    /// The next step of a batch: the references in `params` resolve against `scope` (the steps
+    /// before it), the command runs and its result joins `scope`. [`Session::batch`] runs a list
+    /// of these as one undo step; a caller with its own list — the CLI's script runner — uses this
+    /// so its steps resolve references the same way, inside its own [`Session::grouped`].
+    pub fn batch_step(&mut self, scope: &mut BatchScope, cmd: &str, params: &Value) -> Result<()> {
+        let p = if cmd == "command.batch" { params.clone() } else { scope.resolve(params)? };
+        // Say which step failed; a nested batch names its own steps.
+        let v = self.execute(cmd, &p).map_err(|e| if cmd == "command.batch" { e } else { e.at_step(scope.next_step()) })?;
+        scope.push(v);
+        Ok(())
     }
 
     /// Run `f` as one undo step called `label`: the commands it executes push no steps of their
@@ -1439,7 +1471,9 @@ pub fn normalize(doc: &mut Document, before: &Document) {
         figcraft_layout::coherent_sizing(doc, id);
     }
     touched.extend(doc.take_dirty());
-    // 1. Text auto-size.
+    // 1. Text auto-size (a sticky's note first takes the size its length calls for).
+    board::settle_text(doc, before, &touched);
+    touched.extend(doc.take_dirty());
     for id in live(doc, &touched) {
         let Some(n) = doc.node(id) else { continue };
         if let Some((w, h)) = figcraft_text::auto_size(n)
@@ -1519,6 +1553,9 @@ pub fn normalize(doc: &mut Document, before: &Document) {
             doc.keep_if_unchanged(a, was_dirty);
         }
     }
+    touched.extend(doc.take_dirty());
+    // 4b. Board connectors follow the layers they join; their labels sit at their middles.
+    board::settle_routes(doc, before, &touched);
     touched.extend(doc.take_dirty());
     figcraft_text::appearance::capture(doc, Some(&touched.iter().copied().collect::<Vec<_>>()));
     // 5. Ready-for-dev layers whose contents changed show "Changed".
@@ -1653,9 +1690,19 @@ mod batch_step_ref_tests;
 #[cfg(test)]
 mod binding_lists_tests;
 #[cfg(test)]
+mod board_connector_tests;
+#[cfg(test)]
+mod board_tables_tests;
+#[cfg(test)]
+mod board_tests;
+#[cfg(test)]
+mod board_tools_tests;
+#[cfg(test)]
 mod booleans_tests;
 #[cfg(test)]
 mod bound_alpha_tests;
+#[cfg(test)]
+mod branch_live_tests;
 #[cfg(test)]
 mod branch_tests;
 #[cfg(test)]
@@ -1689,7 +1736,11 @@ mod cursor_tests;
 #[cfg(test)]
 mod dark_page_text_tests;
 #[cfg(test)]
+mod datafill_tests;
+#[cfg(test)]
 mod design_paste_tests;
+#[cfg(test)]
+mod dev_measurements_tests;
 #[cfg(test)]
 mod dev_resources_tests;
 #[cfg(test)]
@@ -1698,6 +1749,10 @@ mod devcompare_tests;
 mod devfocus_tests;
 #[cfg(test)]
 mod devinspect_tests;
+#[cfg(test)]
+mod devmode_behaviour_tests;
+#[cfg(test)]
+mod devmode_tail_tests;
 #[cfg(test)]
 mod doc_urls_tests;
 #[cfg(test)]
@@ -1715,11 +1770,15 @@ mod export_depth_tests;
 #[cfg(test)]
 mod extended_chain_tests;
 #[cfg(test)]
+mod facilitate_tests;
+#[cfg(test)]
 mod fig_export_assets_tests;
 #[cfg(test)]
 mod fig_export_tests;
 #[cfg(test)]
 mod fig_import_tests;
+#[cfg(test)]
+mod fill_none_tests;
 #[cfg(test)]
 mod finite_geometry_tests;
 #[cfg(test)]
@@ -1746,6 +1805,8 @@ mod html_codegen_tests;
 mod huge_stroke_tests;
 #[cfg(test)]
 mod id_params_behaviour_tests;
+#[cfg(test)]
+mod images_left_in_file_tests;
 #[cfg(test)]
 mod import_export_tests;
 #[cfg(test)]
@@ -1833,6 +1894,8 @@ pub(crate) mod plugins_tests;
 #[cfg(test)]
 mod progressive_blur_tests;
 #[cfg(test)]
+mod property_copy_tests;
+#[cfg(test)]
 mod proto_behaviour_tests;
 #[cfg(test)]
 mod proto_conditional_tests;
@@ -1885,6 +1948,8 @@ mod shapes_behaviour_tests;
 #[cfg(test)]
 mod shortcut_parity_tests;
 #[cfg(test)]
+mod sketch_import_tests;
+#[cfg(test)]
 mod slot_tests;
 #[cfg(test)]
 mod stroke_style_tests;
@@ -1896,6 +1961,8 @@ mod style_vars_tests;
 mod styles_behaviour_tests;
 #[cfg(test)]
 mod svg_import_tests;
+#[cfg(test)]
+mod tailwind_tests;
 #[cfg(test)]
 mod templates_tests;
 #[cfg(test)]
@@ -1912,6 +1979,8 @@ mod text_motion_tests;
 mod text_style_picker_tests;
 #[cfg(test)]
 mod text_tail_tests;
+#[cfg(test)]
+mod textfit_tests;
 #[cfg(test)]
 mod theme_pages_tests;
 #[cfg(test)]
@@ -1933,15 +2002,21 @@ mod variants_discovery_tests;
 #[cfg(test)]
 mod vector_behaviour_tests;
 #[cfg(test)]
+mod vector_fill_rule_tests;
+#[cfg(test)]
 mod vector_multi_behaviour_tests;
 #[cfg(test)]
 mod vector_offset_tests;
+#[cfg(test)]
+mod vector_path_set_tests;
 #[cfg(test)]
 mod version_preview_tests;
 #[cfg(test)]
 mod version_tests;
 #[cfg(test)]
 mod view_behaviour_tests;
+#[cfg(test)]
+mod widget_input_tests;
 #[cfg(test)]
 mod widgets_tests;
 

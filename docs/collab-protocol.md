@@ -99,6 +99,15 @@ fit FigCraft's architecture:
   collide with what a connected client makes, because a client's numbers continue above every id of
   its space already in the document. Removed entries are part of the saved session state
   (`SessionState::removed`).
+- **Branches** of a file in a session stay with the person who made them; nothing about them goes
+  over the wire until a merge, which is an ordinary batch from that person (no message or format
+  change). So that the server takes the layers a branch made, a branch made in the session makes
+  its ids in its author's own client space, 2^24 above every id made there on the main file and the
+  author's other branches. Layers of the branch's base that main deleted during the session come
+  back with their ids (the server accepts re-creating deleted ids). Merging a branch whose new
+  layers, styles, variables or comments lie in another id space (one made offline or in an earlier
+  session) is refused by the app before anything is sent, since the server would refuse it (see
+  `crates/engine/src/branches.rs`).
 - Objects inside an entry are not separate objects: modes are part of their collection, a
   variable's values per mode part of the variable and replies part of their comment thread. Two
   people adding a mode to the same collection, editing different modes of one variable, or replying
@@ -142,7 +151,11 @@ As built:
   colour profile, image presets, annotation categories and library data (whole values); styles,
   comment threads, variable collections and variables (one entry per id plus the order of ids;
   the whole list when ids aren't unique); dev-mode snapshots (per layer); images (per content
-  hash, the encoded bytes as base64). The page order is the pages' positions.
+  hash, the encoded bytes as base64); a board's timer and vote (whole values, `DocProp::Timer` and
+  `DocProp::Vote`) and the vote's ballots (`Entry::Ballot(voter)`, one per voter, so people voting
+  at once write different entries). The timer travels as its end time (or, paused, the time left),
+  never as ticks: each client counts down on its own clock. The page order is the pages'
+  positions.
 - **Next**: this file's published library (it embeds a snapshot document; it moves with an asset
   channel, together with images, which then stop travelling inside batches); the version history
   (kept beside the document, not in it) on the standalone server; finer entries for modes,
@@ -991,8 +1004,13 @@ chooses to share on the network; the default is the invite link with a random to
 
 Native text nodes can carry `appearance`: a fingerprint of editable text/style/box inputs,
 positioned vector glyph outlines, line metrics and styled decorations. These are document
-geometry, not font binaries. They travel in the existing node-kind property and normal snapshots,
-logs, saves, undo and redo. A receiving machine with absent faces uses the saved geometry and
-keeps the author's text box. SVG/PDF exports use those outlines too. See [portable-text.md](portable-text.md).
-Both server and clients must understand this optional field; older builds may discard it when
-reading or editing text. Upgrade a test server and its participating clients together.
+geometry, not font binaries. Full creations and snapshots carry them in node kinds. Metadata-only
+text-to-text `kind` updates omit `appearance` and carry `unchangedAppearance: true`; receivers
+apply only hyperlinks/style identifiers, preserving even concurrently changed characters and
+typography together with their geometry. A full kind update without the metadata marker replaces its appearance (null or omission clears it). Regenerated geometry is included with edited
+text in the same property update. Moves, node-paint changes and hyperlinks do not retransmit
+unchanged outlines. Logs, saves, undo and redo retain appearances. No message variant or
+property is added. A receiving machine with absent faces uses the saved geometry and keeps the
+author's text box. SVG/PDF exports use those outlines too. See [portable-text.md](portable-text.md).
+Both server and clients must implement the retained-field update semantics; older builds may
+discard the optional geometry when applying an update. Upgrade participating clients together.

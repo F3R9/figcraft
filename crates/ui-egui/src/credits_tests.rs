@@ -51,12 +51,14 @@ impl Ui {
         u
     }
 
+    /// Store the About table's current view in test context data.
     fn set_view(&self, v: View) {
-        self.ctx.data_mut(|d| d.insert_temp(egui::Id::new("credits_view"), v));
+        self.ctx.data_mut(|d| d.insert_temp(egui::Id::unique("credits_view"), v));
     }
 
+    /// Read the stored About table view, defaulting when unset.
     fn view(&self) -> View {
-        self.ctx.data(|d| d.get_temp::<View>(egui::Id::new("credits_view"))).unwrap_or_default()
+        self.ctx.data(|d| d.get_temp::<View>(egui::Id::unique("credits_view"))).unwrap_or_default()
     }
 
     /// One frame; returns the rect `draw` filled.

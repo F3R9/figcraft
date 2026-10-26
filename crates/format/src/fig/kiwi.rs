@@ -359,6 +359,10 @@ impl<'s> Decoder<'s, '_> {
     fn field(&mut self, f: &Field, depth: usize) -> Result<Kv<'s>, KiwiError> {
         let ty = f.ty.ok_or_else(|| KiwiError("message: untyped field".into()))?;
         if !f.array {
+            // A nested definition spends its own value in `def`.
+            if !matches!(ty, Type::Def(_)) {
+                self.spend(1)?;
+            }
             return self.value(ty, depth);
         }
         let n = self.r.var_uint()? as usize;

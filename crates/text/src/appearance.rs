@@ -13,25 +13,31 @@ const MAX_PATH_BYTES: usize = 16 * 1024 * 1024;
 /// All named faces must exist before reshaping or capturing; never preserve a substitute as
 /// though it were the author's font. A variable font's named instance counts as that face.
 pub fn fonts_available(t: &TextData) -> bool {
-    let mut db = crate::db().write().unwrap_or_else(std::sync::PoisonError::into_inner);
-    std::iter::once(&t.style).chain(t.runs.iter().map(|r| &r.style)).all(|s| {
-        db.find(&s.font_family, &s.font_style).is_some_and(|f| {
-            let italic = s.font_style.to_lowercase().contains("italic");
-            let weight = f64::from(figcraft_doc::style_weight(&s.font_style));
-            let variable_weight = f.axes.iter().any(|a| a.tag == "wght" && a.min <= weight && weight <= a.max);
-            let italic_value = if italic { 1.0 } else { 0.0 };
-            let variable_italic = f.italic == italic
-                || f.axes
-                    .iter()
-                    .any(|a| (a.tag == "ital" && a.min <= italic_value && italic_value <= a.max) || (italic && a.tag == "slnt" && a.min < 0.0));
-            crate::fontdb::norm_style(&f.style) == crate::fontdb::norm_style(&s.font_style)
-                || f.instance(&s.font_style).is_some()
-                || (variable_weight && variable_italic)
-        })
-    })
+    fonts_available_in(crate::db(), t)
+}
+
+fn fonts_available_in(database: &std::sync::RwLock<crate::FontDb>, t: &TextData) -> bool {
+    let styles = || std::iter::once(&t.style).chain(t.runs.iter().map(|r| &r.style));
+    {
+        let db = database.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut complete = true;
+        for s in styles() {
+            match db.cached_named_face(&s.font_family, &s.font_style) {
+                Some(false) => return false,
+                Some(true) => {}
+                None => complete = false,
+            }
+        }
+        if complete {
+            return true;
+        }
+    }
+    let mut db = database.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    styles().all(|s| db.named_face_available(&s.font_family, &s.font_style))
 }
 
 fn fingerprint(t: &TextData, w: Option<f64>, h: Option<f64>) -> Option<String> {
+    // The immutable appearance is shared: cloning editable inputs never copies glyph paths.
     let mut source = t.clone();
     source.appearance = None;
     source.style.style_id = None;
@@ -227,7 +233,7 @@ pub fn capture(doc: &mut Document, ids: Option<&[figcraft_doc::NodeId]>) -> usiz
         if let Ok(n) = doc.get_mut(id)
             && let NodeKind::Text(t) = &mut n.kind
         {
-            t.appearance = Some(Box::new(a));
+            t.appearance = Some(Arc::new(a));
             changed += 1;
         }
     }
@@ -276,8 +282,34 @@ mod tests {
             styles: vec![t.style.clone()],
             truncated: false,
         };
-        t.appearance = Some(Box::new(a));
+        t.appearance = Some(Arc::new(a));
         t
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn warm_missing_face_check_does_not_require_a_database_write_lock() {
+        let t = synthetic();
+        let database = Arc::new(std::sync::RwLock::new(crate::FontDb::default()));
+        assert!(!fonts_available_in(&database, &t));
+        let read = database.read().unwrap();
+        let worker_database = database.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || tx.send(fonts_available_in(&worker_database, &t)).unwrap());
+        let result = rx.recv_timeout(std::time::Duration::from_secs(5));
+        // Always release and join, even if the regression needs the write lock.
+        drop(read);
+        worker.join().unwrap();
+        assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn editing_inputs_and_fingerprinting_share_large_geometry() {
+        let t = synthetic();
+        let cloned = t.clone();
+        assert!(Arc::ptr_eq(t.appearance.as_ref().unwrap(), cloned.appearance.as_ref().unwrap()));
+        assert!(has_saved(&cloned, Some(80.0), Some(40.0)));
+        assert_eq!(Arc::strong_count(t.appearance.as_ref().unwrap()), 2);
     }
 
     #[test]
@@ -285,7 +317,7 @@ mod tests {
         let mut t = synthetic();
         t.auto_resize = TextAutoResize::None;
         t.runs.push(figcraft_doc::StyleRun { start: 0, end: 1, style: t.style.clone() });
-        t.appearance.as_mut().unwrap().fingerprint = fingerprint(&t, Some(80.0), Some(40.0)).unwrap();
+        Arc::make_mut(t.appearance.as_mut().unwrap()).fingerprint = fingerprint(&t, Some(80.0), Some(40.0)).unwrap();
         t.style.style_id = Some("shared-style".into());
         t.style.link = Some("https://example.org/base".into());
         t.runs[0].style.style_id = Some("run-style".into());
@@ -305,7 +337,7 @@ mod tests {
         for mode in [TextAutoResize::None, TextAutoResize::Height, TextAutoResize::Truncate, TextAutoResize::WidthAndHeight] {
             let mut t = synthetic();
             t.auto_resize = mode;
-            t.appearance.as_mut().unwrap().fingerprint = fingerprint(&t, Some(80.0), Some(40.0)).unwrap();
+            Arc::make_mut(t.appearance.as_mut().unwrap()).fingerprint = fingerprint(&t, Some(80.0), Some(40.0)).unwrap();
             assert!(has_saved(&t, Some(80.0), Some(40.0)));
             let width_matters = mode != TextAutoResize::WidthAndHeight;
             assert_eq!(has_saved(&t, Some(160.0), Some(40.0)), !width_matters);
@@ -323,13 +355,13 @@ mod tests {
         t.characters = "Y".into();
         assert!(restore(&t, Some(80.0), Some(40.0)).is_none());
         let mut t = synthetic();
-        t.appearance.as_mut().unwrap().glyphs[0].char_end = 100;
+        Arc::make_mut(t.appearance.as_mut().unwrap()).glyphs[0].char_end = 100;
         assert!(restore(&t, Some(80.0), Some(40.0)).is_none());
         let mut t = synthetic();
-        t.appearance.as_mut().unwrap().glyphs[0].style = 100;
+        Arc::make_mut(t.appearance.as_mut().unwrap()).glyphs[0].style = 100;
         assert!(restore(&t, Some(80.0), Some(40.0)).is_none());
         let mut t = synthetic();
-        t.appearance.as_mut().unwrap().lines[0].glyph_end = 100;
+        Arc::make_mut(t.appearance.as_mut().unwrap()).lines[0].glyph_end = 100;
         assert!(restore(&t, Some(80.0), Some(40.0)).is_none());
     }
 }

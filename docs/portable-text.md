@@ -18,9 +18,15 @@ replacing them with installed ones. The Missing fonts window also checks joined 
 Documents without saved geometry retain the previous fallback display; the warning says that
 saved outlines apply where available. This does not repair a file whose text was already replaced.
 
-The existing node-kind change carries appearances through snapshots, updates, server persistence,
-undo and redo. Update participating clients and the server together: older versions understand
-the editable text but may discard the optional appearance. Native `.figcraft` saves retain it;
+Full node creations and snapshots carry appearances. Metadata-only text-kind updates (hyperlinks and shared-style identifiers) omit
+`appearance` and carry `unchangedAppearance: true`; the receiver applies only those metadata
+fields, retaining its current characters, typography and geometry even after a concurrent edit.
+A full kind update without the metadata marker replaces its appearance (null or omission clears it). Content/typography changes which regenerate geometry
+send the complete appearance with the edited text in the same atomic property update. Moving
+a layer, changing its node paint or updating a hyperlink does not resend unchanged glyph data.
+Server persistence, undo and redo retain appearances. No message variant or property is added.
+Update participating clients and the server together: older receivers may discard the optional
+geometry on an omitted-field update. Native `.figcraft` saves retain the existing appearance;
 the experimental `.fig` exporter does not currently write this extension.
 
 Limits: 100,000 glyphs and 16 MiB of outline strings per layer. Colour bitmap/COLR glyphs currently
@@ -52,3 +58,17 @@ Hosting prepares the captured snapshot before starting the link, and adopts it l
 after startup succeeds. A rejected host/local-share start leaves both the local document and
 its saved baseline untouched. Regressions cover successful and rejected starts with late font
 indexing for clean and dirty tabs.
+
+## Why capture for collaboration rather than export only?
+
+A newly joined collaborator may not have the author’s fonts. The server’s document must already
+contain enough display geometry to render the design before that collaborator edits or exports
+anything. Capturing only at export time would not fix that live-document use case. This is
+font-independent display, not permission to edit text using an absent font.
+
+Appearances are immutable shared data in memory (`Arc`); cloning a text node, an undo entry or
+fingerprinting editable inputs does not clone its outline strings. The serialized native shape
+is unchanged. Exact named-face availability (including missing results) is bounded and cached:
+a warm appearance check takes a read lock, not the font database’s write lock. Adding fonts and
+both initial indexing and rescans invalidate these results, including late-installed styles.
+The cache contains face names/results only, never font binaries.

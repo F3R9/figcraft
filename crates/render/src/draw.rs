@@ -156,15 +156,26 @@ pub(crate) fn hash_path(p: &BezPath, h: &mut impl Hasher) {
     }
 }
 
+/// Per-side strokes on rectangles and frames (a ring under non-zero winding too), if `n` has them.
+fn side_strokes(n: &Node) -> Option<Arc<BezPath>> {
+    let props = &n.stroke;
+    let sides = props.sides?;
+    if !matches!(n.kind, NodeKind::Rectangle | NodeKind::Frame | NodeKind::Component { .. } | NodeKind::Instance { .. }) {
+        return None;
+    }
+    let c = &n.corners;
+    Some(Arc::new(if c.uniform() == Some(0.0) {
+        figcraft_pathops::rect_side_strokes(n.width, n.height, sides, props.align)
+    } else {
+        figcraft_pathops::rounded_side_strokes(n.width, n.height, c.radii, c.smoothing, sides, props.align)
+    }))
+}
+
 /// The stroke area of a node in local coordinates.
 pub fn stroke_area(n: &Node, path: &BezPath, closed: bool) -> Arc<BezPath> {
     let props = &n.stroke;
-    // Per-side strokes on rectangles/frames.
-    if let Some(sides) = props.sides
-        && matches!(n.kind, NodeKind::Rectangle | NodeKind::Frame | NodeKind::Component { .. } | NodeKind::Instance { .. })
-        && n.corners.uniform() == Some(0.0)
-    {
-        return Arc::new(figcraft_pathops::rect_side_strokes(n.width, n.height, sides, props.align));
+    if let Some(p) = side_strokes(n) {
+        return p;
     }
     // Rect/ellipse inside/outside strokes without booleans: an even-odd ring of two outlines.
     if props.dashes.is_empty() && props.profile().is_none() && props.brush.is_none() && closed && props.align != StrokeAlign::Center {
@@ -205,6 +216,18 @@ pub fn stroke_area(n: &Node, path: &BezPath, closed: bool) -> Arc<BezPath> {
             return Arc::new(o);
         }
     }
+    cached_stroke_outline(n, path, closed)
+}
+
+/// The stroke a boolean operand contributes: like [`stroke_area`], but never an even-odd ring
+/// (boolean folding uses non-zero winding).
+fn operand_stroke(n: &Node, path: &BezPath, closed: bool) -> Arc<BezPath> {
+    side_strokes(n).unwrap_or_else(|| cached_stroke_outline(n, path, closed))
+}
+
+/// A non-zero stroke outline (cached), shared by painting and boolean operands.
+fn cached_stroke_outline(n: &Node, path: &BezPath, closed: bool) -> Arc<BezPath> {
+    let props = &n.stroke;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     hash_path(path, &mut h);
     (props.weight.to_bits(), props.align as u8, props.cap_start as u8, props.cap_end as u8, props.join as u8, props.miter_limit.to_bits(), closed)
@@ -213,11 +236,12 @@ pub fn stroke_area(n: &Node, path: &BezPath, closed: bool) -> Arc<BezPath> {
         d.to_bits().hash(&mut h);
     }
     props.dashes.len().hash(&mut h);
-    // Points' own caps and joins (vector networks).
+    // Points' own caps and joins and the fill rule Inside/Outside clip by (vector networks).
     let net = match &n.kind {
-        NodeKind::Vector { network } if network.has_point_styles(props.join) => Some(network),
+        NodeKind::Vector { network } => Some(network),
         _ => None,
     };
+    net.is_some_and(|n| n.regions.iter().any(|r| r.winding == figcraft_doc::WindingRule::EvenOdd)).hash(&mut h);
     for v in net.map(|n| n.vertices.as_slice()).unwrap_or_default() {
         (v.cap.map(|c| c as u8), v.join.map(|j| j as u8)).hash(&mut h);
     }
@@ -276,7 +300,7 @@ fn node_outline_at(doc: &Document, n: &Node, depth: usize) -> Option<(BezPath, F
                 .filter_map(|c| doc.node(*c))
                 .filter(|c| c.visible)
                 .filter_map(|c| {
-                    let (mut p, _) = subtree_outline(doc, c, depth + 1)?;
+                    let (mut p, _) = subtree_outline_at(doc, c, depth + 1, true)?;
                     p.apply_affine(c.transform);
                     Some((p, c.bool_op.unwrap_or(*op)))
                 })
@@ -300,6 +324,11 @@ fn node_outline_at(doc: &Document, n: &Node, depth: usize) -> Option<(BezPath, F
 
 /// The union outline of a node and its descendants (for booleans of groups/frames).
 pub fn subtree_outline(doc: &Document, n: &Node, depth: usize) -> Option<(BezPath, FillRule)> {
+    subtree_outline_at(doc, n, depth, false)
+}
+
+/// Boolean operands with only a stroke contribute the painted band, not their interior.
+fn subtree_outline_at(doc: &Document, n: &Node, depth: usize, stroke_only: bool) -> Option<(BezPath, FillRule)> {
     if depth > 64 {
         return None;
     }
@@ -308,20 +337,29 @@ pub fn subtree_outline(doc: &Document, n: &Node, depth: usize) -> Option<(BezPat
             let mut out = BezPath::new();
             if n.kind.is_frame_like()
                 && let Some(p) = figcraft_doc::geometry::shape_path(n)
-                && n.fills.iter().any(|f| f.visible)
             {
-                out.extend(p.elements().iter().copied());
+                if n.fills.iter().any(|f| f.visible) {
+                    out.extend(p.elements().iter().copied());
+                } else if stroke_only && n.has_visible_stroke() {
+                    out.extend(operand_stroke(n, &p, true).elements().iter().copied());
+                }
             }
             for c in n.children.iter().filter_map(|c| doc.node(*c)) {
                 if !c.visible {
                     continue;
                 }
-                if let Some((mut p, _)) = subtree_outline(doc, c, depth + 1) {
+                if let Some((mut p, _)) = subtree_outline_at(doc, c, depth + 1, stroke_only) {
                     p.apply_affine(c.transform);
                     out.extend(p.elements().iter().copied());
                 }
             }
             Some((out, FillRule::Winding))
+        }
+        _ if stroke_only && !n.fills.iter().any(|p| p.visible) && n.has_visible_stroke() => {
+            let (path, _) = node_outline_at(doc, n, depth)?;
+            let path = if matches!(n.kind, NodeKind::Text(_)) { path } else { figcraft_doc::geometry::stroke_geometry(n).unwrap_or(path) };
+            let closed = figcraft_doc::geometry::is_closed(n) || matches!(n.kind, NodeKind::BooleanOp { .. });
+            Some(((*operand_stroke(n, &path, closed)).clone(), FillRule::Winding))
         }
         _ => node_outline_at(doc, n, depth),
     }

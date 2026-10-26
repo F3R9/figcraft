@@ -115,6 +115,11 @@ pub(crate) fn within_app_folder(path: &Path, folder: &Path) -> bool {
     matches!((std::fs::canonicalize(path), std::fs::canonicalize(folder)), (Ok(p), Ok(f)) if p.starts_with(&f))
 }
 
+pub fn same_file(a: impl AsRef<Path>, b: impl AsRef<Path>) -> bool {
+    let (a, b) = (a.as_ref(), b.as_ref());
+    a == b || same_file::is_same_file(a, b).unwrap_or(false)
+}
+
 /// `p` without Windows' `\\?\` prefix, for messages.
 fn shown(p: &Path) -> String {
     let s = p.to_string_lossy();

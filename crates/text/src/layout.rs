@@ -104,7 +104,7 @@ pub struct Decoration {
 }
 
 /// Most dots or wave samples drawn for one decoration.
-const MAX_DECO_STEPS: usize = 20_000;
+const MAX_DECO_STEPS: usize = 2_500;
 
 impl Decoration {
     /// The line's outline: a bar, a row of dots or a wave, `thickness` thick.
@@ -260,6 +260,11 @@ struct Item {
 impl Item {
     fn is_space(&self) -> bool {
         crate::breaks::is_space(self.ch)
+    }
+    /// A space justified text widens: not U+200B, which only marks where a line may break (between
+    /// the words of Thai, Lao, Khmer or Burmese text, written without spaces).
+    fn stretches(&self) -> bool {
+        self.is_space() && self.ch != '\u{200B}'
     }
 }
 
@@ -594,7 +599,7 @@ pub fn layout(text: &TextData, box_width: Option<f64>, box_height: Option<f64>) 
             items.get(vis_end.wrapping_sub(1)).filter(|it| hang_end && !rtl_line && vis_end > *s + 1 && closes(it.ch)).map_or(0.0, |it| it.adv);
         let gstart = out.glyphs.len();
         // Justify: extra space per gap.
-        let gaps = items.get(*s..vis_end).unwrap_or(&[]).iter().filter(|it| it.is_space()).count();
+        let gaps = items.get(*s..vis_end).unwrap_or(&[]).iter().filter(|it| it.stretches()).count();
         let justify_extra = match (text.align_h, wrap) {
             (TextAlignH::Justified, Some(maxw)) if !para_end && !break_after(*e) && gaps > 0 => {
                 ((maxw - line_indent + hang_l + hang_r - width) / gaps as f64).max(0.0)
@@ -610,7 +615,7 @@ pub fn layout(text: &TextData, box_width: Option<f64>, box_height: Option<f64>) 
             .unwrap_or(&[])
             .iter()
             .filter(|it| !is_line_break(it.ch))
-            .map(|it| it.adv + if it.is_space() { justify_extra } else { 0.0 })
+            .map(|it| it.adv + if it.stretches() { justify_extra } else { 0.0 })
             .sum();
         let mut pen = if rtl_line { -trailing } else { line_indent - hang_l };
         // List marker (before the line's text; zero-length char range so carets skip it).
@@ -707,7 +712,7 @@ pub fn layout(text: &TextData, box_width: Option<f64>, box_height: Option<f64>) 
                 });
             }
             pen += it.adv;
-            if it.is_space() {
+            if it.stretches() {
                 pen += justify_extra;
             }
         }
@@ -1047,6 +1052,18 @@ fn is_emoji(c: char) -> bool {
     matches!(c, '\u{1F1E6}'..='\u{1F1FF}' | '\u{1F300}'..='\u{1FAFF}')
 }
 
+/// The lower case of the capital sigma at `i`: the final form ς or σ, chosen from the letters
+/// around it in the whole text (as lower-casing the whole string would), not from the lone char.
+fn lower_sigma(chars: &[char], i: usize) -> char {
+    // Enough context to step over any realistic run of combining marks next to the sigma.
+    const CONTEXT: usize = 32;
+    let before: String = chars.get(i.saturating_sub(CONTEXT)..i).unwrap_or(&[]).iter().collect();
+    let after: String = chars.iter().skip(i + 1).take(CONTEXT).collect();
+    let lower = format!("{before}\u{3A3}{after}").to_lowercase();
+    // Only the sigma's lower case depends on context, so the text before it keeps its length.
+    lower.get(before.to_lowercase().len()..).and_then(|s| s.chars().next()).unwrap_or('σ')
+}
+
 /// One run of chars shaped with a single face and style.
 struct Segment<'a> {
     start: usize,
@@ -1077,6 +1094,8 @@ fn shape_segment(chars: &[char], seg: &Segment, face: &Arc<Face>, features: &[Fe
             for u in c.to_uppercase() {
                 mapped.push((u, src, true));
             }
+        } else if style.case == TextCase::Lower && *c == 'Σ' {
+            mapped.push((lower_sigma(chars, src), src, false));
         } else {
             let mut buf = [0u8; 4];
             for u in style.case.apply_after(c.encode_utf8(&mut buf), prev).chars() {

@@ -165,7 +165,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "component.resetOverride",
             "Reset override",
-            "{id?, group? (fills|strokes|effects|opacity|visible|name|corners|characters|textStyle|padding|gap|alignment|grids|exports|interactions|size|position|component|props|slot; all when omitted)}",
+            "{id?, group? (fills|strokes|effects|opacity|visible|name|corners|characters|textStyle|padding|gap|alignment|grids|exports|interactions|size|position|modes|component|props|slot; all when omitted)}",
             true,
             reset_override
         ),
@@ -217,14 +217,14 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "component.addProperty",
             "Add component property",
-            "{id? (component, set, or a layer inside a component: it gets bound), name, type: boolean|text|instanceSwap|variant|slot, default?, layer? (node bound to it; a frame for slots), preferred? (instance swap and slot properties: component or set ids offered first)}",
+            "{id? (component, set, or a layer inside a component: it gets bound), name, type: boolean|text|instanceSwap|variant|slot, default? (boolean: the bound layer's visibility in the main; without it, the layer's current visibility), layer? (node bound to it; a frame for slots), preferred? (instance swap and slot properties: component or set ids offered first)}",
             true,
             add_prop
         ),
         spec!(
             "component.editProperty",
             "Edit component property",
-            "{id? (component or set), name, newName?, default? (variant properties: that variant takes the top-left place), value? + newValue? (rename a variant value), index? (variant properties: move to this place; the variants' names follow), preferred? (instance swap and slot properties: component or set ids offered first)}",
+            "{id? (component or set), name, newName?, default? (variant properties: that variant takes the top-left place; boolean: the main's bound layers show or hide to match), value? + newValue? (rename a variant value), index? (variant properties: move to this place; the variants' names follow), preferred? (instance swap and slot properties: component or set ids offered first)}",
             true,
             edit_prop
         ),
@@ -786,6 +786,38 @@ fn push_changes(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"layers": pushed}))
 }
 
+fn restore_prop_defs(doc: &Document, props: &BTreeMap<String, Value>) -> BTreeMap<String, PropDef> {
+    let mut defs = BTreeMap::new();
+    for (k, v) in props {
+        let def = match v {
+            Value::Bool(b) => PropDef::Boolean { default: *b },
+            Value::String(t) => PropDef::Text { default: t.clone() },
+            other => match id_of(other) {
+                Some(c) if doc.contains(c) => PropDef::InstanceSwap { default: c, preferred: Vec::new() },
+                _ => continue,
+            },
+        };
+        defs.insert(k.clone(), def);
+    }
+    defs
+}
+
+fn restore_id_map(doc: &mut Document, i: NodeId, component: NodeId, sub: &[NodeId]) -> BTreeMap<NodeId, NodeId> {
+    let mut map: BTreeMap<NodeId, NodeId> = BTreeMap::new();
+    let mut used: BTreeSet<NodeId> = BTreeSet::new();
+    map.insert(i, component);
+    used.insert(component);
+    for d in sub.iter().filter(|d| **d != i) {
+        let src = doc.node(*d).and_then(|n| n.source);
+        let nid = match src {
+            Some(s) if !doc.contains(s) && used.insert(s) => s,
+            _ => doc.alloc_id(),
+        };
+        map.insert(*d, nid);
+    }
+    map
+}
+
 fn restore_main(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "component.restoreMain";
     let i = targets(s, p).first().copied().ok_or_else(|| bad(cmd, "select an instance"))?;
@@ -804,35 +836,13 @@ fn restore_main(s: &mut Session, p: &Value) -> Result<Value> {
     // The main comes back with its old id (other instances point to it) and its layers with the
     // ids their copies mirror, so every instance re-links by source.
     let sub = doc.subtree(i);
-    let mut map: BTreeMap<NodeId, NodeId> = BTreeMap::new();
-    let mut used: BTreeSet<NodeId> = BTreeSet::new();
-    map.insert(i, component);
-    used.insert(component);
-    for d in sub.iter().filter(|d| **d != i) {
-        let src = doc.node(*d).and_then(|n| n.source);
-        let nid = match src {
-            Some(s) if !doc.contains(s) && used.insert(s) => s,
-            _ => doc.alloc_id(),
-        };
-        map.insert(*d, nid);
-    }
+    let map = restore_id_map(doc, i, component, &sub);
     let mut nodes = Vec::new();
     let mut nested = Vec::new();
     for d in &sub {
         let Some(mut n) = doc.node(*d).cloned() else { continue };
         if *d == i {
-            let mut defs = BTreeMap::new();
-            for (k, v) in &props {
-                let def = match v {
-                    Value::Bool(b) => PropDef::Boolean { default: *b },
-                    Value::String(t) => PropDef::Text { default: t.clone() },
-                    other => match id_of(other) {
-                        Some(c) if doc.contains(c) => PropDef::InstanceSwap { default: c, preferred: Vec::new() },
-                        _ => continue,
-                    },
-                };
-                defs.insert(k.clone(), def);
-            }
+            let defs = restore_prop_defs(doc, &props);
             n.kind = NodeKind::Component { description: String::new(), props: defs };
             n.source = None;
             n.overrides.clear();
@@ -1141,7 +1151,8 @@ fn add_prop_for(cmd: &str, s: &mut Session, p: &Value) -> Result<Value> {
     }
     let layer_node = layer.and_then(|l| doc.node(l)).cloned();
     let def = match t.to_ascii_lowercase().as_str() {
-        "boolean" | "bool" => PropDef::Boolean { default: boolean(p, "default").unwrap_or(true) },
+        // Without a default, a bound layer keeps showing as it does: its visibility is the default.
+        "boolean" | "bool" => PropDef::Boolean { default: boolean(p, "default").or_else(|| layer_node.as_ref().map(|n| n.visible)).unwrap_or(true) },
         "text" => PropDef::Text {
             default: string(p, "default")
                 .or_else(|| layer_node.as_ref().and_then(|n| n.kind.text()).map(|t| t.characters.clone()))
@@ -1245,7 +1256,12 @@ fn bind(cmd: &str, doc: &mut Document, layer: NodeId, property: Option<&str>, fi
         }
         _ => {}
     }
-    doc.get_mut(layer)?.prop_refs.insert(field.to_string(), property.to_string());
+    let n = doc.get_mut(layer)?;
+    n.prop_refs.insert(field.to_string(), property.to_string());
+    // On the main, a boolean property's value is the visibility of the layers it controls.
+    if let PropDef::Boolean { default } = def {
+        n.visible = *default;
+    }
     Ok(())
 }
 
@@ -1413,6 +1429,10 @@ fn edit_prop(s: &mut Session, p: &Value) -> Result<Value> {
         if let Some(nn) = &new_name {
             rename_prop_refs(doc, *c, &name, Some(nn))?;
         }
+    }
+    // The main's bound layers show the new default.
+    if let PropDef::Boolean { default } = new_def {
+        set_boolean_default(doc, &comps, new_name.as_deref().unwrap_or(&name), default);
     }
     ok()
 }

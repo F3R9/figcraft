@@ -107,10 +107,14 @@ const DENIED: &[&str] = &[
     "plugins.",
     "libraries.",
     "library.add",
+    // Uploads the open document to a server.
+    "library.publishToServer",
     "edit.undo",
     "edit.redo",
     "edit.repeat",
     "command.batch",
+    // Runs other commands inside (duplicate, edit, export), past this policy, like a batch.
+    "data.fill",
     // Network sessions, online files and their recovery copies on disk.
     "collab.",
     // Opens files in new windows.
@@ -131,6 +135,9 @@ fn refusal(m: &Manifest, command: &str, params: &Value) -> Option<String> {
     }
     if command == "image.place" && get(params, "path").is_some() {
         return Some("plugins can't read files: pass the image as `data`".into());
+    }
+    if command == "text.loadFont" && get(params, "path").is_some() {
+        return Some("plugins can't read files: pass the font as `data`".into());
     }
     // `path` here is a file on disk (elsewhere it is a vector path or an action's place).
     if matches!(command, "variable.export" | "codeConnect.export" | "component.playground") && get(params, "path").is_some() {
@@ -155,7 +162,8 @@ fn refusal(m: &Manifest, command: &str, params: &Value) -> Option<String> {
 /// Whether `params` set layer data (`pluginData`, anywhere in them) under a widget's own keys.
 fn writes_widget_data(params: &Value, depth: usize) -> bool {
     let own = |data: &Value| data.as_object().is_some_and(|m| m.keys().any(|k| k.starts_with(crate::widgets::DATA_PREFIX)));
-    depth < 64
+    // serde_json refuses nesting past 128, so nothing deeper can reach here.
+    depth < 128
         && match params {
             Value::Object(m) => m.iter().any(|(k, v)| (k == "pluginData" && own(v)) || writes_widget_data(v, depth + 1)),
             Value::Array(a) => a.iter().any(|v| writes_widget_data(v, depth + 1)),
@@ -168,6 +176,39 @@ fn writes_widget_data(params: &Value, depth: usize) -> bool {
 struct EngineHost<'s> {
     s: &'s mut Session,
     manifest: &'s Manifest,
+    /// Files offered for saving in this call.
+    saves: u32,
+}
+
+/// Longest file name a plugin may suggest, in characters.
+const MAX_SAVE_NAME: usize = 128;
+/// Longest MIME type a plugin may name, in bytes.
+const MAX_SAVE_MIME: usize = 100;
+/// Largest file a plugin may offer for saving, in bytes (the sandbox's message limit).
+const MAX_SAVE_BYTES: usize = 16 * 1024 * 1024;
+/// Files a plugin may offer per call.
+const MAX_SAVES: u32 = 1;
+
+/// A file name a plugin suggested, cleaned up: a bare name without folders, drive letters, `..` or
+/// characters no file system takes. `None` when nothing usable is left.
+pub(crate) fn sanitize_save_name(name: &str) -> Option<String> {
+    let name = name.trim();
+    let bad = name.is_empty()
+        || name.chars().count() > MAX_SAVE_NAME
+        || name == "."
+        || name.contains("..")
+        || name.chars().any(|c| c.is_control() || crate::cmd::file::FORBIDDEN_FILE_NAME_CHARS.contains(c));
+    if bad { None } else { Some(name.to_string()) }
+}
+
+/// `mime` when it looks like `type/subtype` in ASCII, else the generic binary type.
+fn sanitize_mime(mime: &str) -> String {
+    let mime = mime.trim();
+    let token = |t: &str| !t.is_empty() && t.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '-' | '_'));
+    match mime.split_once('/') {
+        Some((a, b)) if mime.len() <= MAX_SAVE_MIME && token(a) && token(b) => mime.to_ascii_lowercase(),
+        _ => "application/octet-stream".into(),
+    }
 }
 
 impl figcraft_plugin::Host for EngineHost<'_> {
@@ -239,6 +280,27 @@ impl figcraft_plugin::Host for EngineHost<'_> {
         if all.entry(id.clone()).or_default().insert(key.to_string(), v.clone()).as_ref() != Some(&v) {
             self.s.plugins.unsaved = true;
         }
+        Ok(())
+    }
+
+    fn save_file(&mut self, name: &str, mime: &str, data: &[u8]) -> std::result::Result<(), String> {
+        if !self.manifest.permissions.save_file {
+            return Err(format!("{} didn't ask permission to save files (`permissions.saveFile`)", self.manifest.name));
+        }
+        let name = sanitize_save_name(name).ok_or_else(|| {
+            format!("not a usable file name: use a plain name of 1–{MAX_SAVE_NAME} characters without folders or `/ \\ : .. < > \" | ? *`")
+        })?;
+        if data.len() > MAX_SAVE_BYTES {
+            return Err(format!("a file to save is limited to {} MB", MAX_SAVE_BYTES / (1024 * 1024)));
+        }
+        if self.saves >= MAX_SAVES {
+            return Err("a plugin can offer one file per run".into());
+        }
+        self.saves += 1;
+        use base64::Engine as _;
+        let data = base64::engine::general_purpose::STANDARD.encode(data);
+        // The app asks the user where it goes; programmatic callers drop the request.
+        self.s.request_ui("dialog.pluginSave", json!({"plugin": self.manifest.id, "name": name, "mime": sanitize_mime(mime), "data": data}));
         Ok(())
     }
 }
@@ -385,6 +447,7 @@ pub(crate) fn register(s: &mut Session, entry: InstalledPlugin, wasm: Vec<u8>) -
     match list.iter_mut().find(|x| x.manifest.id == id) {
         Some(slot) => {
             *slot = entry;
+            s.prefs.plugin_settings.remove(&id);
             true
         }
         None => {
@@ -450,14 +513,21 @@ pub(crate) fn call_plugin(
     input: &str,
 ) -> std::result::Result<RunOutput, (EngineError, bool)> {
     let mut usable = false;
-    s.grouped(label, |s| {
-        let mut host = EngineHost { s, manifest: m };
-        instance.call(input, &mut host).map_err(|e| {
-            usable = matches!(e, PluginError::Failed(_));
-            plugin_error(&m.name, e)
+    let ui_before = s.ui_requests.len();
+    let r = s
+        .grouped(label, |s| {
+            let mut host = EngineHost { s, manifest: m, saves: 0 };
+            instance.call(input, &mut host).map_err(|e| {
+                usable = matches!(e, PluginError::Failed(_));
+                plugin_error(&m.name, e)
+            })
         })
-    })
-    .map_err(|e| (e, usable))
+        .map_err(|e| (e, usable));
+    // A failed run opens no dialog (a file it offered to save is dropped with it).
+    if r.is_err() {
+        s.ui_requests.truncate(ui_before);
+    }
+    r
 }
 
 /// What `plugin.run` and `plugin.event` return.
@@ -591,4 +661,29 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!("plugins.runLast", "Run last plugin", "{}", false, run_last),
         spec!("plugins.manage", "Manage plugins…", "{}  opens the plugins window; returns the list like `plugin.list`", false, manage),
     ]
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    #[test]
+    fn read_only_plugin_cannot_publish_to_server() {
+        let m = Manifest::parse(r#"{"id":"x.y","name":"X","main":"plugin.wasm"}"#).unwrap();
+        let r = refusal(&m, "library.publishToServer", &json!({}));
+        assert!(r.is_some(), "library.publishToServer uploads the document and must be refused");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn widget_data_is_found_at_any_depth_serde_accepts() {
+        let depth = 100;
+        let text = format!("{}{{\"pluginData\":{{\"{}x\":1}}}}{}", "{\"a\":".repeat(depth), crate::widgets::DATA_PREFIX, "}".repeat(depth));
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert!(writes_widget_data(&v, 0));
+    }
 }

@@ -4,7 +4,7 @@
 //! Entering edit mode on a non-vector shape converts it to a vector first (like the incumbent).
 //! Vertex coordinates are node-local; after each edit the node is re-fitted so its box wraps the
 //! network again. The network edits themselves live in [`ops`]; pointer gestures in `pointer.rs`,
-//! the transform box around several points in [`transform`], point snapping in `point_snap.rs` and
+//! the transform box around several points (in one layer or several) in [`transform`], point snapping in `point_snap.rs` and
 //! hovering, hatching and selecting filled regions in [`regions`].
 
 pub mod ops;
@@ -539,9 +539,28 @@ pub fn begin_many(s: &mut Session, ids: &[NodeId]) -> Result<()> {
 /// At most this many layers are edited at once.
 const MAX_EDITED: usize = 500;
 
+/// The edited layers left without a single segment: they draw nothing (isolated points included),
+/// so their layer would only leave an empty box behind.
+fn empty_layers(doc: &Document, ids: &[NodeId]) -> Vec<NodeId> {
+    ids.iter().copied().filter(|id| network(doc, *id).is_some_and(|n| n.segments.is_empty())).collect()
+}
+
+/// Leave edit mode. Layers whose every point was deleted go with it (the undo step that deleted
+/// the last points brings them back).
 pub fn end(s: &mut Session) -> Result<()> {
+    let empty = {
+        let ds = s.ds()?;
+        ds.vector_edit.as_ref().map(|ve| empty_layers(&ds.doc, &ve.parts().iter().map(|p| p.id).collect::<Vec<_>>())).unwrap_or_default()
+    };
+    if !empty.is_empty() {
+        let doc = s.doc_mut()?;
+        for id in &empty {
+            let _ = doc.remove(*id);
+        }
+    }
     let ds = s.ds_mut()?;
     ds.vector_edit = None;
+    ds.selection.retain(|id| !empty.contains(id));
     ds.revision += 1;
     s.tool.overlay = Default::default();
     Ok(())
