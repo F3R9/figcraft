@@ -2,6 +2,26 @@
 
 ## Chunked transport extension (2026-10-20)
 
+### Motivation and evidence (2026-10-27)
+
+There is no demonstrated universal 1 MiB WebSocket limit in FigCraft or common proxies.
+The native client defaults to a 1 GiB logical receive budget, and a synthetic legacy welcome
+larger than 1 MiB succeeds without negotiation. A transparent [Caddy](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#streaming)/[nginx](https://nginx.org/en/docs/http/websocket.html) upgrade tunnel is
+not evidence of a message-size cap; HTTP request-body limits must not be confused with it.
+
+There is a documented message-terminating intermediary use case: [Cloudflare Workers](https://developers.cloudflare.com/workers/runtime-apis/websockets/)
+close WebSockets with code 1009 above **32 MiB** per received message. Their [2025-10-31 changelog](https://developers.cloudflare.com/changelog/post/2025-10-31-increased-websocket-message-size-limit/)
+states the earlier 1 MiB limit was raised to 32 MiB. This applies to Workers, not every
+Cloudflare-proxied WebSocket, and does not establish how `collab.craftapps.dev` is deployed.
+
+The explicit 65 MiB socket regression models that documented 32 MiB message cap locally:
+the legacy welcome fails while the negotiated welcome succeeds in bounded pieces. It does
+not contact a live Worker or the public collaboration service. The 1 MiB **chunk payload**
+is a conservative packet size, not an asserted intermediary limit. Storage/logical budgets
+remain enforced; constant-memory loading and a need on the public service are not claimed.
+
+### Encoding and negotiation
+
 Peers negotiate `figcraft.chunks.v1` through an echoed `X-FigCraft-Transfer` handshake header
 (native clients), or the WebSocket subprotocol (browsers cannot set custom headers). The
 collaboration core, operation ordering, persistence and protocol version 2 are unchanged. An old
@@ -138,6 +158,15 @@ fit FigCraft's architecture:
   collide with what a connected client makes, because a client's numbers continue above every id of
   its space already in the document. Removed entries are part of the saved session state
   (`SessionState::removed`).
+- **Branches** of a file in a session stay with the person who made them; nothing about them goes
+  over the wire until a merge, which is an ordinary batch from that person (no message or format
+  change). So that the server takes the layers a branch made, a branch made in the session makes
+  its ids in its author's own client space, 2^24 above every id made there on the main file and the
+  author's other branches. Layers of the branch's base that main deleted during the session come
+  back with their ids (the server accepts re-creating deleted ids). Merging a branch whose new
+  layers, styles, variables or comments lie in another id space (one made offline or in an earlier
+  session) is refused by the app before anything is sent, since the server would refuse it (see
+  `crates/engine/src/sharing/branches.rs`).
 - Objects inside an entry are not separate objects: modes are part of their collection, a
   variable's values per mode part of the variable and replies part of their comment thread. Two
   people adding a mode to the same collection, editing different modes of one variable, or replying
@@ -181,7 +210,11 @@ As built:
   colour profile, image presets, annotation categories and library data (whole values); styles,
   comment threads, variable collections and variables (one entry per id plus the order of ids;
   the whole list when ids aren't unique); dev-mode snapshots (per layer); images (per content
-  hash, the encoded bytes as base64). The page order is the pages' positions.
+  hash, the encoded bytes as base64); a board's timer and vote (whole values, `DocProp::Timer` and
+  `DocProp::Vote`) and the vote's ballots (`Entry::Ballot(voter)`, one per voter, so people voting
+  at once write different entries). The timer travels as its end time (or, paused, the time left),
+  never as ticks: each client counts down on its own clock. The page order is the pages'
+  positions.
 - **Next**: this file's published library (it embeds a snapshot document; it moves with an asset
   channel, together with images, which then stop travelling inside batches); the version history
   (kept beside the document, not in it) on the standalone server; finer entries for modes,

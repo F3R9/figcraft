@@ -86,14 +86,25 @@ fn sixty_five_mib_document_crosses_real_socket() {
     // Synthetic content only. This exercises transport above 64 MiB, not the separate
     // persistent server's file quota, which an operator must explicitly configure.
     let (_host, invite, name) = host_with_name("S".repeat(65 * CHUNK)).unwrap();
+    // Model the documented Cloudflare Worker 32 MiB message cap, not an asserted
+    // configuration of collab.craftapps.dev. This is a real local socket, not a live Worker.
+    let wire_limit = 32 * CHUNK;
+    let wire_config = || tungstenite::protocol::WebSocketConfig::default().max_message_size(Some(wire_limit)).max_frame_size(Some(wire_limit));
+    let stream = std::net::TcpStream::connect(&invite.server.host).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    let (mut legacy, _) = tungstenite::client::client_with_config(invite.endpoint(), stream, Some(wire_config())).unwrap();
+    legacy.send(Message::Binary(message::encode(&Client::hello("large-test", TOKEN, "Legacy cap test", "")).unwrap().into())).unwrap();
+    assert!(matches!(legacy.read(), Err(tungstenite::Error::Capacity(_))));
+    drop(legacy);
     let limits = NetLimits::default();
     let (mut ws, _, _) = crate::net::connect_websocket(&invite.server, Duration::from_secs(30), &limits).unwrap();
-    ws.set_config(|c| *c = crate::net::config(CHUNK + 49));
+    ws.set_config(|c| *c = wire_config());
     send_binary(&mut ws, &message::encode(&Client::hello("large-test", TOKEN, "Large test", "")).unwrap()).unwrap();
     let mut rx = Receiver::default();
     let mut pieces = 0;
     loop {
         let Message::Binary(bytes) = ws.read().unwrap() else { continue };
+        assert!(bytes.len() <= CHUNK + 49 && bytes.len() < wire_limit);
         pieces += 1;
         let Some(bytes) = rx.push(&bytes, true, limits.max_server_message).unwrap() else { continue };
         assert!(bytes.len() > 64 * CHUNK);
@@ -102,6 +113,22 @@ fn sixty_five_mib_document_crosses_real_socket() {
         break;
     }
     assert!(pieces > 64);
+    eprintln!("65 MiB local socket: legacy rejected by 32 MiB message cap; chunked welcome verified in {pieces} bounded packets");
+    let _ = ws.close(None);
+}
+
+#[test]
+fn legacy_default_receives_messages_larger_than_one_mib() {
+    let (_host, invite, name) = host().unwrap();
+    let stream = std::net::TcpStream::connect(&invite.server.host).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let limits = NetLimits::default();
+    let (mut ws, _) =
+        tungstenite::client::client_with_config(invite.endpoint(), stream, Some(crate::net::config(limits.max_server_message))).unwrap();
+    ws.send(Message::Binary(message::encode(&Client::hello("large-test", TOKEN, "Default legacy", "")).unwrap().into())).unwrap();
+    let Message::Binary(bytes) = ws.read().unwrap() else { panic!("expected a legacy welcome") };
+    assert!(bytes.len() > CHUNK);
+    assert_eq!(Client::join(message::decode::<ServerMsg>(&bytes, limits.max_server_message).unwrap()).unwrap().document().name, name);
     let _ = ws.close(None);
 }
 
