@@ -855,7 +855,20 @@ checksum = "c07782be35f9e1140080c6b96f0d44b739e2278479f64e02fdab4e32dfd8b081"
 dependencies = [
  "bitflags 1.3.2",
  "core-foundation 0.9.4",
- "core-graphics-types",
+ "core-graphics-types 0.1.3",
+ "foreign-types",
+ "libc",
+]
+
+[[package]]
+name = "core-graphics"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "064badf302c3194842cf2c5d61f56cc88e54a759313879cdf03abdd27d0c3b97"
+dependencies = [
+ "bitflags 2.13.2",
+ "core-foundation 0.10.1",
+ "core-graphics-types 0.2.0",
  "foreign-types",
  "libc",
 ]
@@ -869,6 +882,28 @@ dependencies = [
  "bitflags 1.3.2",
  "core-foundation 0.9.4",
  "libc",
+]
+
+[[package]]
+name = "core-graphics-types"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d44a101f213f6c4cdc1853d4b78aef6db6bdfa3468798cc1d9912f4735013eb"
+dependencies = [
+ "bitflags 2.13.2",
+ "core-foundation 0.10.1",
+ "libc",
+]
+
+[[package]]
+name = "core-text"
+version = "22.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "333dab512ce710ca2d08574c373d246dbeac8b22769e47da4c0e72730ce442b7"
+dependencies = [
+ "core-foundation 0.10.1",
+ "core-graphics 0.25.0",
+ "foreign-types",
 ]
 
 [[package]]
@@ -1077,6 +1112,12 @@ dependencies = [
  "quote",
  "syn 3.0.9",
 ]
+
+[[package]]
+name = "deunicode"
+version = "1.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "abd57806937c9cc163efc8ea3910e00a62e2aeb0b8119f1793a978088f8f6b04"
 
 [[package]]
 name = "digest"
@@ -1610,6 +1651,7 @@ version = "0.11.2"
 dependencies = [
  "base64 0.22.1",
  "craft-docpath",
+ "deunicode",
  "figcraft-collab",
  "figcraft-color",
  "figcraft-doc",
@@ -1622,6 +1664,7 @@ dependencies = [
  "figcraft-render",
  "figcraft-svg",
  "figcraft-text",
+ "figcraft-vectordrawable",
  "image",
  "log",
  "regex",
@@ -1645,6 +1688,7 @@ dependencies = [
  "ruzstd",
  "serde",
  "serde_json",
+ "sha1",
  "sha2",
  "zip 2.6.1",
 ]
@@ -1782,10 +1826,12 @@ dependencies = [
 name = "figcraft-text"
 version = "0.11.2"
 dependencies = [
+ "core-text",
  "figcraft-doc",
  "figcraft-geom",
  "harfrust 0.13.3",
  "log",
+ "objc2 0.6.5",
  "png",
  "serde_json",
  "sha2",
@@ -1822,9 +1868,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "figcraft-vectordrawable"
+version = "0.11.2"
+dependencies = [
+ "figcraft-color",
+ "figcraft-doc",
+ "figcraft-geom",
+ "figcraft-pathops",
+ "figcraft-render",
+ "figcraft-text",
+ "roxmltree 0.21.2",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "figcraft-web"
 version = "0.11.2"
 dependencies = [
+ "base64 0.22.1",
  "eframe",
  "egui",
  "figcraft-collab-net",
@@ -1832,6 +1893,7 @@ dependencies = [
  "figcraft-ui-egui",
  "js-sys",
  "log",
+ "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -5984,7 +6046,7 @@ dependencies = [
  "cfg_aliases",
  "concurrent-queue",
  "core-foundation 0.9.4",
- "core-graphics",
+ "core-graphics 0.23.2",
  "cursor-icon",
  "dpi",
  "js-sys",
