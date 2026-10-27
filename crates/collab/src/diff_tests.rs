@@ -358,3 +358,35 @@ fn portable_metadata_and_concurrent_text_edits_converge_with_undo() {
         assert!(sim.violations.is_empty(), "{:?}", sim.violations);
     }
 }
+
+#[test]
+fn compact_base_metadata_keeps_concurrent_run_overrides() {
+    let mut doc = Document::new("Portable metadata race");
+    let page = doc.first_page().unwrap();
+    let mut text = portable_text();
+    text.runs.push(figcraft_doc::StyleRun { start: 0, end: 8, style: text.style.clone() });
+    let id = doc.create(page, NodeKind::Text(text), "Text", 0.0, 0.0, 100.0, 20.0).unwrap();
+    let base = Replica::new(doc.clone());
+    let mut metadata = doc.clone();
+    if let NodeKind::Text(t) = &mut metadata.get_mut(id).unwrap().kind {
+        t.style.link = Some("https://example.org/base".into());
+    }
+    let changes = diff(&base, &metadata).unwrap().changes;
+    let mut concurrent = doc.clone();
+    if let NodeKind::Text(t) = &mut concurrent.get_mut(id).unwrap().kind {
+        t.runs[0].style.link = Some("https://example.org/concurrent".into());
+    }
+    let mut replica = Replica::new(concurrent);
+    replica.apply(&changes, Mode::Strict).unwrap();
+    let t = replica.document().node(id).unwrap().kind.text().unwrap();
+    assert_eq!(t.style.link.as_deref(), Some("https://example.org/base"));
+    assert_eq!(t.runs[0].style.link.as_deref(), Some("https://example.org/concurrent"));
+    // Run-level edits use the existing atomic kind write rather than silently dropping
+    // unmatched ranges when concurrent typography splits or merges them.
+    let mut edited = doc.clone();
+    if let NodeKind::Text(t) = &mut edited.get_mut(id).unwrap().kind {
+        t.runs[0].style.link = Some("https://example.org/run".into());
+    }
+    let changes = round_trip(&base, &edited);
+    assert!(changes.iter().any(|c| matches!(c, Change::Set { prop: Prop::Kind, value, .. } if value.0.get("unchangedAppearance").is_none())));
+}

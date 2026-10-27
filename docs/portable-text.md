@@ -18,12 +18,14 @@ replacing them with installed ones. The Missing fonts window also checks joined 
 Documents without saved geometry retain the previous fallback display; the warning says that
 saved outlines apply where available. This does not repair a file whose text was already replaced.
 
-Full node creations and snapshots carry appearances. Metadata-only text-kind updates (hyperlinks and shared-style identifiers) omit
+Full node creations and snapshots carry appearances. Base-style metadata-only text-kind updates (hyperlinks and shared-style identifiers), with unchanged runs, omit
 `appearance` and carry `unchangedAppearance: true`; the receiver applies only those metadata
-fields, retaining its current characters, typography and geometry even after a concurrent edit.
+fields, retaining its current characters, typography, run overrides and geometry even after a concurrent edit.
+Changes to run metadata use the existing atomic full-kind update, avoiding a partial merge that
+could silently discard links when concurrent edits split or merge run ranges.
 A full kind update without the metadata marker replaces its appearance (null or omission clears it). Content/typography changes which regenerate geometry
 send the complete appearance with the edited text in the same atomic property update. Moving
-a layer, changing its node paint or updating a hyperlink does not resend unchanged glyph data.
+a layer, changing its node paint or updating base metadata does not resend unchanged glyph data.
 Server persistence, undo and redo retain appearances. No message variant or property is added.
 Update participating clients and the server together: older receivers may discard the optional
 geometry on an omitted-field update. Native `.figcraft` saves retain the existing appearance;
@@ -72,3 +74,16 @@ is unchanged. Exact named-face availability (including missing results) is bound
 a warm appearance check takes a read lock, not the font database’s write lock. Adding fonts and
 both initial indexing and rescans invalidate these results, including late-installed styles.
 The cache contains face names/results only, never font binaries.
+
+Restored geometry takes hyperlinks from current editable character spans, not saved style links.
+Removing or replacing a link therefore also updates missing-font PDF annotations. Saved line
+glyph ranges must be ordered and non-overlapping, bounding cumulative traversal by glyph count;
+PDF link collection also stops at its annotation/work budget independently.
+
+Gesture previews normalize layout without capturing outlines on every disposable step. Commit
+captures the final geometry before history/live synchronization; cancel retains the original.
+Ordinary commands and typing still capture before synchronization. A synthetic 3,300-character
+resize test measures eager capture versus deferred previews and verifies commit/undo/cancel.
+On the local Windows optimized test build, 16 steps took 335.8 ms with eager capture versus
+2.9 ms for deferred previews and 21.7 ms including commit. This synthetic measurement isolates
+outline-capture overhead; it is not an end-to-end canvas or network benchmark.

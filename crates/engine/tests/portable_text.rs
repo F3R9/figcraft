@@ -30,6 +30,20 @@ fn portable_text_other_computer() {
         let live_svg = figcraft_svg::export_svg(&doc, &[id], &figcraft_svg::SvgOptions { outline_text: false, ..Default::default() }).unwrap();
         assert!(!live_svg.contains("<text"), "an absent font must not change the exported appearance");
         assert!(figcraft_pdf::export_nodes_pdf(&doc, &[id]).unwrap().starts_with(b"%PDF"));
+        let mut linked = doc.clone();
+        for url in [Some("https://example.org/current"), None] {
+            if let NodeKind::Text(t) = &mut linked.get_mut(id).unwrap().kind {
+                t.style.link = url.map(str::to_owned);
+                let saved = std::sync::Arc::make_mut(t.appearance.as_mut().unwrap());
+                for style in &mut saved.styles {
+                    style.link = Some("https://example.org/stale".into());
+                }
+            }
+            let pdf = figcraft_pdf::export_nodes_pdf(&linked, &[id]).unwrap();
+            let pdf = String::from_utf8_lossy(&pdf);
+            assert!(!pdf.contains("https://example.org/stale"));
+            assert_eq!(pdf.contains("https://example.org/current"), url.is_some());
+        }
         let mut session = Session::with_document(doc);
         let old = session.doc().unwrap().clone();
         assert!(figcraft_engine::textedit::begin(&mut session, id, None, false).is_err());
@@ -149,4 +163,61 @@ fn portable_text_other_computer() {
 
 fn n_width(doc: &Document, id: figcraft_doc::NodeId) -> f64 {
     doc.node(id).unwrap().width
+}
+
+#[test]
+fn resizing_captures_once_at_commit_and_cancel_retains_original_geometry() {
+    figcraft_text::scan_system_fonts();
+    let Some(face) = figcraft_text::find_face("Arial", "Regular") else {
+        assert!(std::env::var_os("CRAFT_FONTS_REQUIRED").is_none(), "measurement needs a source face");
+        return;
+    };
+    let mut doc = Document::new("Synthetic resize measurement");
+    let mut text = TextData::new("Portable text resize measurement. ".repeat(100));
+    text.style.font_family = face.family.clone();
+    text.style.font_style = face.style.clone();
+    text.auto_resize = TextAutoResize::None;
+    let id = doc.create(doc.first_page().unwrap(), NodeKind::Text(text), "Text", 0.0, 0.0, 600.0, 8000.0).unwrap();
+    let mut session = Session::with_document(doc);
+    let before = session.doc().unwrap().clone();
+    let original = before.node(id).unwrap().kind.text().unwrap().appearance.clone().unwrap();
+    let start = std::time::Instant::now();
+    for step in 0..16 {
+        let mut preview = before.clone();
+        preview.get_mut(id).unwrap().width = 610.0 + f64::from(step);
+        figcraft_engine::normalize(&mut preview, &before);
+    }
+    let eager = start.elapsed();
+    session.begin_interaction("Resize portable text").unwrap();
+    let start = std::time::Instant::now();
+    for step in 0..16 {
+        session
+            .preview(|doc, _| {
+                doc.get_mut(id)?.width = 610.0 + f64::from(step);
+                Ok(())
+            })
+            .unwrap();
+        let current = session.doc().unwrap().node(id).unwrap().kind.text().unwrap();
+        assert!(std::sync::Arc::ptr_eq(current.appearance.as_ref().unwrap(), &original));
+    }
+    let previews = start.elapsed();
+    session.commit_interaction().unwrap();
+    let committed = session.doc().unwrap().node(id).unwrap();
+    assert!(figcraft_text::appearance::has_saved(committed.kind.text().unwrap(), Some(committed.width), Some(committed.height)));
+    assert!(!std::sync::Arc::ptr_eq(committed.kind.text().unwrap().appearance.as_ref().unwrap(), &original));
+    eprintln!(
+        "portable resize, 3300 characters / 16 previews: eager={eager:?}, deferred previews={previews:?}, including commit={:?}",
+        start.elapsed()
+    );
+    assert!(session.undo().unwrap());
+    assert_eq!(*session.doc().unwrap(), before);
+    session.begin_interaction("Cancel resize").unwrap();
+    session
+        .preview(|doc, _| {
+            doc.get_mut(id)?.width = 700.0;
+            Ok(())
+        })
+        .unwrap();
+    session.cancel_interaction().unwrap();
+    assert_eq!(*session.doc().unwrap(), before);
 }

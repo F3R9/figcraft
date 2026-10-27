@@ -1005,10 +1005,10 @@ chooses to share on the network; the default is the invite link with a random to
 Native text nodes can carry `appearance`: a fingerprint of editable text/style/box inputs,
 positioned vector glyph outlines, line metrics and styled decorations. These are document
 geometry, not font binaries. Full creations and snapshots carry them in node kinds. Metadata-only
-text-to-text `kind` updates omit `appearance` and carry `unchangedAppearance: true`; receivers
-apply only hyperlinks/style identifiers, preserving even concurrently changed characters and
+text-to-text `kind` updates with unchanged runs omit `appearance` and carry `unchangedAppearance: true`; receivers
+apply only base-style hyperlinks/style identifiers, leaving all current run overrides intact and preserving concurrently changed characters and
 typography together with their geometry. A full kind update without the metadata marker replaces its appearance (null or omission clears it). Regenerated geometry is included with edited
-text in the same property update. Moves, node-paint changes and hyperlinks do not retransmit
+text in the same property update. Run metadata uses a normal atomic kind update rather than a partial run merge. Moves, node-paint changes and base metadata do not retransmit
 unchanged outlines. Logs, saves, undo and redo retain appearances. No message variant or
 property is added. A receiving machine with absent faces uses the saved geometry and keeps the
 author's text box. SVG/PDF exports use those outlines too. See [portable-text.md](portable-text.md).

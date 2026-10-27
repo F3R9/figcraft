@@ -117,11 +117,13 @@ pub(crate) fn restore(t: &TextData, w: Option<f64>, h: Option<f64>) -> Option<Te
             })
         })
         .collect::<Option<Vec<_>>>()?;
+    let mut previous_end = 0;
     let lines = a
         .lines
         .iter()
         .map(|l| {
-            if l.glyph_start > l.glyph_end
+            if l.glyph_start < previous_end
+                || l.glyph_start > l.glyph_end
                 || l.glyph_end > glyphs.len()
                 || l.char_start > l.char_end
                 || l.char_end > chars
@@ -129,6 +131,7 @@ pub(crate) fn restore(t: &TextData, w: Option<f64>, h: Option<f64>) -> Option<Te
             {
                 return None;
             }
+            previous_end = l.glyph_end;
             Some(Line {
                 glyph_start: l.glyph_start,
                 glyph_end: l.glyph_end,
@@ -155,7 +158,33 @@ pub(crate) fn restore(t: &TextData, w: Option<f64>, h: Option<f64>) -> Option<Te
             Some(Decoration { rect: Rect::new(d.rect[0], d.rect[1], d.rect[2], d.rect[3]), style: d.style, kind: d.kind, thickness: d.thickness })
         })
         .collect::<Option<Vec<_>>>()?;
-    Some(TextLayout { glyphs, lines, decorations, styles: a.styles.clone(), width: a.width, height: a.height, truncated: a.truncated, on_path: None })
+    // Saved geometry owns drawing styles, never hyperlink destinations. Resolve current
+    // editable metadata by character span, including links changed after capture.
+    let mut glyphs = glyphs;
+    let mut styles = a.styles.clone();
+    for style in &mut styles {
+        style.link = None;
+        style.style_id = None;
+    }
+    let spans = t.spans();
+    let mut mapped = std::collections::BTreeMap::new();
+    for glyph in &mut glyphs {
+        let index = spans.partition_point(|(_, end, _)| *end <= glyph.char_start).min(spans.len().saturating_sub(1));
+        let Some((_, _, current)) = spans.get(index) else { continue };
+        if current.link.is_none() && current.style_id.is_none() {
+            continue;
+        }
+        let mut style = styles.get(glyph.style).cloned()?;
+        let key = (glyph.style, index);
+        glyph.style = *mapped.entry(key).or_insert_with(|| {
+            style.link = current.link.clone();
+            style.style_id = current.style_id.clone();
+            let id = styles.len();
+            styles.push(style);
+            id
+        });
+    }
+    Some(TextLayout { glyphs, lines, decorations, styles, width: a.width, height: a.height, truncated: a.truncated, on_path: None })
 }
 
 /// Add/update appearances on machines with the original fonts. Existing valid geometry is
@@ -363,5 +392,43 @@ mod tests {
         let mut t = synthetic();
         Arc::make_mut(t.appearance.as_mut().unwrap()).lines[0].glyph_end = 100;
         assert!(restore(&t, Some(80.0), Some(40.0)).is_none());
+    }
+
+    #[test]
+    fn restored_links_follow_current_character_spans_not_saved_styles() {
+        let mut t = synthetic();
+        t.characters = "XY".into();
+        t.runs.push(figcraft_doc::StyleRun { start: 1, end: 2, style: t.style.clone() });
+        let key = fingerprint(&t, Some(80.0), Some(40.0)).unwrap();
+        let a = Arc::make_mut(t.appearance.as_mut().unwrap());
+        a.fingerprint = key;
+        a.styles[0].link = Some("https://example.org/stale".into());
+        let mut second = a.glyphs[0].clone();
+        second.char_start = 1;
+        second.char_end = 2;
+        a.glyphs.push(second);
+        a.lines[0].glyph_end = 2;
+        a.lines[0].char_end = 2;
+        t.runs[0].style.link = Some("https://example.org/current".into());
+        let layout = restore(&t, Some(80.0), Some(40.0)).unwrap();
+        assert!(layout.styles[layout.glyphs[0].style].link.is_none());
+        assert_eq!(layout.styles[layout.glyphs[1].style].link.as_deref(), Some("https://example.org/current"));
+        assert!(layout.styles.iter().all(|s| s.link.as_deref() != Some("https://example.org/stale")));
+        t.runs[0].style.link = None;
+        let layout = restore(&t, Some(80.0), Some(40.0)).unwrap();
+        assert!(layout.styles.iter().all(|s| s.link.is_none()));
+    }
+
+    #[test]
+    fn restored_line_ranges_cannot_multiply_glyph_traversal() {
+        let mut t = synthetic();
+        let a = Arc::make_mut(t.appearance.as_mut().unwrap());
+        a.lines = vec![a.lines[0].clone(); MAX_GLYPHS];
+        assert!(restore(&t, Some(80.0), Some(40.0)).is_none());
+        let a = Arc::make_mut(t.appearance.as_mut().unwrap());
+        a.lines.truncate(2);
+        a.lines[1].glyph_start = 1;
+        a.lines[1].glyph_end = 1;
+        assert!(restore(&t, Some(80.0), Some(40.0)).is_some(), "empty trailing lines are valid");
     }
 }

@@ -243,14 +243,8 @@ impl Replica {
                 {
                     current.style.link = metadata.style.link.clone();
                     current.style.style_id = metadata.style.style_id.clone();
-                    if current.characters == metadata.characters {
-                        for run in &mut current.runs {
-                            if let Some(m) = metadata.runs.iter().find(|m| m.start == run.start && m.end == run.end) {
-                                run.style.link = m.style.link.clone();
-                                run.style.style_id = m.style.style_id.clone();
-                            }
-                        }
-                    }
+                    // The compact form changes only base metadata. Runs may have been split
+                    // by a concurrent edit; leave their explicit overrides untouched.
                     return Ok(Relist::No);
                 }
                 node.kind = kind;

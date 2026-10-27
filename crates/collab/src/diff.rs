@@ -129,7 +129,7 @@ fn field_update(prop: Prop, before: &figcraft_doc::Node, after: &figcraft_doc::N
         return prop.get(after);
     }
     let (Some(old), Some(new)) = (before.kind.text(), after.kind.text()) else { return prop.get(after) };
-    if old.appearance.is_some() && old.appearance == new.appearance && same_text_geometry(old, new) {
+    if old.appearance.is_some() && old.appearance == new.appearance && old.runs == new.runs && same_text_geometry(old, new) {
         let mut kind = after.kind.clone();
         if let figcraft_doc::NodeKind::Text(t) = &mut kind {
             t.appearance = None;

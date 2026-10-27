@@ -99,10 +99,15 @@ const MAX_LINKS: usize = 10_000;
 /// Note the hyperlinked text of a layout (`gxf`: layout → PDF page): one area per line and run of
 /// glyphs linking to the same URL.
 fn record_links(ex: &mut Exporter, layout: &TextLayout, gxf: Affine) {
+    let mut visited = 0usize;
     for line in &layout.lines {
         let mut run: Option<(&str, f64, f64)> = None;
         let glyphs = layout.glyphs.get(line.glyph_start..line.glyph_end).unwrap_or(&[]);
         for g in glyphs.iter().map(Some).chain([None]) {
+            if ex.links.len() >= MAX_LINKS || (g.is_some() && visited >= 100_000) {
+                return;
+            }
+            visited += usize::from(g.is_some());
             let link = g.and_then(|g| {
                 let url = layout.styles.get(g.style)?.link.as_deref().filter(|u| !u.trim().is_empty())?;
                 let (a, b) = (g.x, g.x + g.advance);
