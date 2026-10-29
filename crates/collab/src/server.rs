@@ -441,6 +441,7 @@ impl Server {
             | ClientMsg::Plugins(_)
             | ClientMsg::OpenHosting(_)
             | ClientMsg::Resolve(_)
+            | ClientMsg::FetchAsset(_)
             | ClientMsg::Report { .. } => {
                 vec![Outgoing::To(from, ServerMsg::Refused { reason: "managing files and libraries needs a connection of its own".into() })]
             }
@@ -650,6 +651,7 @@ pub fn weight(changes: &[Change]) -> usize {
             Change::Put { value, .. } => 64 + json(&value.0),
             Change::Delete { .. } => 16,
             Change::Remove { .. } => 64,
+            Change::Image(image) => 128usize.saturating_add(image.bytes.as_ref().map_or(0, |bytes| bytes.0.len())),
         })
         .fold(0, usize::saturating_add)
 }

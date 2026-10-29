@@ -29,10 +29,10 @@ pub use export::{
     frames_pdf, jobs_for, penpot_bytes, safe_file_name,
 };
 use export::{export, export_frames_pdf, export_layers, pdf_bytes};
-use load::font_report;
+use load::{OWNED_RECOVERY, font_report, recovered_mode};
 #[cfg(test)]
 pub(crate) use load::{installed_family, sketch_line};
-pub use load::{load, load_bytes, load_path};
+pub use load::{load, load_bytes, load_path, recover_app_owned};
 pub(crate) use load::{load_fig, read_capped, recovered, variables_param, write};
 pub use open::MAX_RECENT;
 #[cfg(test)]
@@ -181,11 +181,15 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "file.recover",
             "Recover file",
-            "{path}  open a recovery copy (written while the app runs, read back after a crash) as a document with unsaved changes and no path: saving asks where → {index}",
+            "{path, allowRemoteReferences?: false}  open a recovery copy as an unsaved document with no path → {index}; external cache references are refused by default. true is reserved for the trusted desktop recovery API and is refused for ordinary command/CLI/MCP/plugin callers",
             false,
             |s, p| {
                 let path = req_string("file.recover", p, "path")?;
-                s.docs.push(recovered(&path)?);
+                let references = p.get("allowRemoteReferences").and_then(Value::as_bool).unwrap_or(false);
+                if references && !OWNED_RECOVERY.get() {
+                    return Err(EngineError::Disabled("file.recover".into(), "external cache references are reserved for app-owned recovery".into()));
+                }
+                s.docs.push(recovered_mode(&path, references)?);
                 s.active = s.docs.len() - 1;
                 Ok(json!({"index": s.active}))
             }
@@ -348,6 +352,7 @@ pub fn export_file(doc: &Document, ids: &[NodeId], setting: &ExportSetting, scal
         return Err(nothing());
     }
     let drawn = drawn_layers(doc, ids, setting);
+    let _originals = figcraft_render::images::require_for_nodes(doc, &drawn).map_err(EngineError::Other)?;
     if setting.format.is_vector() {
         figcraft_render::check_export_depth(doc, &drawn).map_err(|e| EngineError::Other(e.to_string()))?;
     }

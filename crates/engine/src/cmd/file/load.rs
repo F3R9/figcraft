@@ -1,10 +1,36 @@
+use crate::Session;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{DocState, Document, EngineError, LineHeight, NodeId, NodeKind, Result, StyleKind, TextStyle, Value, bad, get, json};
 
+thread_local! {
+    pub(super) static OWNED_RECOVERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Recover a copy owned by the desktop host, preserving its existing cache references. This
+/// trusted Rust entry point is not exposed through the command catalog, CLI, MCP or plugins.
+/// The normal command still runs, and the permission is reset on both errors and unwinding.
+pub fn recover_app_owned(s: &mut Session, path: &str) -> Result<Value> {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            OWNED_RECOVERY.set(self.0);
+        }
+    }
+    let _restore = Restore(OWNED_RECOVERY.replace(true));
+    s.execute("file.recover", &json!({"path": path, "allowRemoteReferences": true}))
+}
+
 /// The recovery copy at `path` as a document with unsaved changes and no path.
 pub(crate) fn recovered(path: &str) -> Result<DocState> {
-    let loaded = read(path).and_then(|b| figcraft_format::load_bytes_with_versions(&b).map_err(|e| EngineError::Other(e.to_string())))?;
+    recovered_mode(path, true)
+}
+
+pub(super) fn recovered_mode(path: &str, references_allowed: bool) -> Result<DocState> {
+    let loaded = read(path).and_then(|b| {
+        if references_allowed { figcraft_format::load_recovery_bytes_with_versions(&b) } else { figcraft_format::load_bytes_with_versions(&b) }
+            .map_err(|e| EngineError::Other(e.to_string()))
+    })?;
     Ok(DocState::new(loaded.doc, None).with_versions(loaded.versions).with_branches(loaded.branches).unsaved())
 }
 
