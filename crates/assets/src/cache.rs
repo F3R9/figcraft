@@ -39,7 +39,8 @@ pub fn generation() -> u64 {
 pub const DISK_BUDGET: u64 = 512 << 20;
 const MEMORY_BUDGET: usize = 64 << 20;
 
-fn memory(asset: &AssetRef) -> Option<Arc<Vec<u8>>> {
+/// Already resident encoded bytes only: no disk lookup and no download request.
+pub fn peek(asset: &AssetRef) -> Option<Arc<Vec<u8>>> {
     let mut s = state().0.lock().unwrap_or_else(PoisonError::into_inner);
     s.tick = s.tick.wrapping_add(1);
     let tick = s.tick;
@@ -73,7 +74,7 @@ fn remember_locked(s: &mut State, asset: &AssetRef, bytes: Arc<Vec<u8>>) {
 /// Paint only looks in memory and queues work. The single bounded worker probes the disk
 /// and starts a download on a miss; decoding and network completion invalidate rendering.
 pub fn display(asset: &AssetRef) -> Option<Arc<Vec<u8>>> {
-    if let Some(bytes) = memory(asset) {
+    if let Some(bytes) = peek(asset) {
         return Some(bytes);
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -139,6 +140,7 @@ fn reader() -> &'static Option<std::sync::mpsc::SyncSender<ReadJob>> {
 /// Explicit cache clearing never removes a document, its resident originals or server data.
 /// Pending downloads may populate new entries again while their session remains open.
 pub fn clear() -> Result<(), String> {
+    crate::preview::clear();
     #[cfg(not(target_arch = "wasm32"))]
     disk().clear()?;
     let mut s = state().0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -330,7 +332,7 @@ pub fn require(asset: &AssetRef) -> Result<Arc<Vec<u8>>, String> {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load(asset: &AssetRef) -> Result<Arc<Vec<u8>>, String> {
-    if let Some(bytes) = memory(asset) {
+    if let Some(bytes) = peek(asset) {
         return Ok(bytes);
     }
     let bytes = disk().read(asset)?;
@@ -637,7 +639,7 @@ mod tests {
         thread.join().unwrap();
         assert!(result.unwrap(), "paint waited for disk or returned uncached data");
         let until = Instant::now() + Duration::from_secs(5);
-        while memory(&asset).is_none() && Instant::now() < until {
+        while peek(&asset).is_none() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(display(&asset).unwrap().as_slice(), bytes);

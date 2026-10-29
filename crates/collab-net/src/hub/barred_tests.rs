@@ -73,6 +73,7 @@ fn a_kicked_connection_with_a_full_queue_is_shut() {
     while tx.try_send(Out::Bytes(Default::default(), None)).is_ok() {}
     let out = Line {
         assets: false,
+        previews: false,
         tx,
         queued: Arc::default(),
         block: Arc::new(AtomicUsize::new(0)),

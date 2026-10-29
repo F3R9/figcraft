@@ -75,6 +75,7 @@ pub(crate) enum Push {
 #[derive(Clone)]
 pub(crate) struct Line {
     pub(crate) assets: bool,
+    pub(crate) previews: bool,
     pub(crate) tx: SyncSender<Out>,
     pub(crate) queued: Arc<AtomicUsize>,
     pub(crate) block: Arc<AtomicUsize>,

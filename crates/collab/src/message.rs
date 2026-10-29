@@ -632,6 +632,10 @@ pub enum ClientMsg {
     Resolve(Resolve),
     /// Only after negotiating binary assets: request one image from this joined file.
     FetchAsset(figcraft_assets::AssetRef),
+    /// Small display-only image, after the native previews handshake.
+    FetchPreview(figcraft_assets::preview::Request),
+    /// Up to eight independent display requests in one rate-limited message.
+    FetchPreviews(Vec<figcraft_assets::preview::Request>),
 }
 
 /// Server → client.
@@ -706,6 +710,11 @@ pub enum ServerMsg {
     /// The response to FetchAsset. Immutable binary data is separate from document operations.
     Asset {
         asset: figcraft_assets::AssetRef,
+        bytes: Option<figcraft_assets::Blob>,
+        error: Option<String>,
+    },
+    Preview {
+        request: figcraft_assets::preview::Request,
         bytes: Option<figcraft_assets::Blob>,
         error: Option<String>,
     },

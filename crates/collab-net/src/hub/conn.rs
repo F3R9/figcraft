@@ -202,10 +202,15 @@ fn serve(mut stream: TcpStream, conn: u64, hub: &Sender<HubIn>, limits: NetLimit
     let cfg = config(limits.max_client_message);
     let mut forwarded = None;
     let mut assets = false;
+    let mut previews = false;
     // The handshake callback's type is tungstenite's (its error is an HTTP response).
     #[allow(clippy::result_large_err)]
     let read_client = |req: &Request, mut resp: Response| -> Result<Response, ErrorResponse> {
         assets = req.headers().get("X-FigCraft-Assets").is_some_and(|v| v == crate::assets_wire::PROTOCOL);
+        previews = assets && req.headers().get("X-FigCraft-Previews").is_some_and(|v| v == crate::previews::PROTOCOL);
+        if previews {
+            resp.headers_mut().insert("X-FigCraft-Previews", tungstenite::http::HeaderValue::from_static(crate::previews::PROTOCOL));
+        }
         if assets {
             resp.headers_mut().insert("X-FigCraft-Assets", tungstenite::http::HeaderValue::from_static(crate::assets_wire::PROTOCOL));
         }
@@ -224,6 +229,8 @@ fn serve(mut stream: TcpStream, conn: u64, hub: &Sender<HubIn>, limits: NetLimit
     };
     ws.get_mut().assets = assets;
     wr.assets = assets;
+    ws.get_mut().previews = previews;
+    wr.previews = previews;
     if proxied && forwarded.is_none() {
         log::debug!("live session: connection {conn} came through the proxy without X-Forwarded-For");
     }
@@ -243,6 +250,7 @@ fn serve(mut stream: TcpStream, conn: u64, hub: &Sender<HubIn>, limits: NetLimit
     let (tx, rx) = sync_channel::<Out>(limits.queue.max(4));
     let out = Line {
         assets,
+        previews,
         tx,
         queued: Arc::default(),
         block: block.queued.clone(),

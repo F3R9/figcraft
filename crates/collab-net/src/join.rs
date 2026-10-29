@@ -258,7 +258,8 @@ pub(crate) fn take(m: ServerMsg, cfg: &GuestConfig, inbox: &Inbox, seen: &mut Se
         | ServerMsg::Library(_)
         | ServerMsg::Plugins(_)
         | ServerMsg::Resolved { .. }
-        | ServerMsg::Asset { .. } => {}
+        | ServerMsg::Asset { .. }
+        | ServerMsg::Preview { .. } => {}
     }
     Taken::Continue
 }

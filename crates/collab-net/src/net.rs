@@ -29,6 +29,7 @@ pub fn config(max: usize) -> WebSocketConfig {
 pub(crate) fn request(url: &str) -> Result<tungstenite::handshake::client::Request, String> {
     use tungstenite::client::IntoClientRequest;
     let mut request = url.into_client_request().map_err(|e| e.to_string())?;
+    request.headers_mut().insert("X-FigCraft-Previews", tungstenite::http::HeaderValue::from_static(crate::previews::PROTOCOL));
     request.headers_mut().insert("X-FigCraft-Assets", tungstenite::http::HeaderValue::from_static(crate::assets_wire::PROTOCOL));
     Ok(request)
 }
@@ -44,6 +45,8 @@ pub(crate) fn connect_websocket(
     let (mut ws, response) = tungstenite::client::client_with_config(request(&server.url())?, rd, Some(config(limits.max_server_message)))
         .map_err(|e| format!("{} doesn't answer as a FigCraft server: {e}", server.display()))?;
     wr.assets = response.headers().get("X-FigCraft-Assets").is_some_and(|p| p == crate::assets_wire::PROTOCOL);
+    wr.previews = wr.assets && response.headers().get("X-FigCraft-Previews").is_some_and(|p| p == crate::previews::PROTOCOL);
+    ws.get_mut().previews = wr.previews;
     ws.get_mut().assets = wr.assets;
     Ok((ws, wr, sock))
 }
@@ -63,6 +66,7 @@ pub struct Duplex {
     /// What the bytes read count against (a server's reader), if anything.
     meter: Option<Meter>,
     pub(crate) assets: bool,
+    pub(crate) previews: bool,
     /// When reading must be over, however slowly the bytes come ([`Duplex::read_until`]).
     deadline: Option<Instant>,
 }
@@ -71,8 +75,9 @@ impl Duplex {
     /// Two handles on `stream` (for the reader and the writer) and one to shut it down with.
     pub fn split(stream: TcpStream, tls: Option<Tls>) -> io::Result<(Duplex, Duplex, TcpStream)> {
         let write = Arc::new(Mutex::new(stream.try_clone()?));
-        let a = Duplex { read: stream.try_clone()?, write: write.clone(), tls: tls.clone(), meter: None, deadline: None, assets: false };
-        let b = Duplex { read: stream.try_clone()?, write, tls, meter: None, deadline: None, assets: false };
+        let a =
+            Duplex { read: stream.try_clone()?, write: write.clone(), tls: tls.clone(), meter: None, deadline: None, assets: false, previews: false };
+        let b = Duplex { read: stream.try_clone()?, write, tls, meter: None, deadline: None, assets: false, previews: false };
         Ok((a, b, stream))
     }
 

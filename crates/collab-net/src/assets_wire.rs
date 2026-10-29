@@ -139,6 +139,14 @@ pub(crate) fn client(msg: &ClientMsg, binary: bool) -> Result<Vec<u8>, String> {
     if let ClientMsg::FetchAsset(asset) = &mut msg {
         asset.scope.clear();
     }
+    if let ClientMsg::FetchPreview(request) = &mut msg {
+        request.asset.scope.clear();
+    }
+    if let ClientMsg::FetchPreviews(requests) = &mut msg {
+        for request in requests {
+            request.asset.scope.clear();
+        }
+    }
     client_changes(&mut msg, &mut |changes| prepare(changes, if binary { Mode::Binary } else { Mode::Legacy }))?;
     message::encode(&msg).map_err(|e| e.to_string())
 }

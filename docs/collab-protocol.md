@@ -1109,3 +1109,16 @@ Preferences and the Actions command `image.cache.clear` clear downloaded origina
 entries are removed, never documents or server storage. A connected session can download them
 again (in-flight responses can repopulate the cache); offline/history data is not a durable backup.
 Clearing also invalidates rendered generations and discards stale queued cache reads.
+
+## Progressive display previews (native extension)
+
+An echoed `X-FigCraft-Previews: figcraft.previews.v1` header on a resource connection enables
+batched requests for disposable display-sized PNGs. No chunk/transfer header is required.
+The host validates file membership and size buckets, generates previews with bounded workers
+outside the hub, and retains a bounded memory cache. Guests validate outstanding requests,
+PNG dimensions and byte budgets before caching a response. Clearing the image cache also
+clears preview buffers; already in-flight replies can populate them again.
+
+Deferred canvas images use resolution levels; local resident images keep main's display-copy
+optimization. Zoom can request sharper previews or exact originals. Previews never become file
+assets or undo data: save/export still obtain original bytes. See [image-previews](image-previews.md).

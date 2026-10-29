@@ -272,6 +272,66 @@ impl<B: Backend> Hub<B> {
 
     /// A message on connection `conn` (from `ip`), by what the connection is for.
     fn message(&mut self, conn: u64, ip: IpAddr, msg: ClientMsg, bytes: usize) {
+        if let ClientMsg::FetchPreviews(requests) = &msg {
+            if requests.is_empty() || requests.len() > 8 {
+                return self.kick(&[conn], "invalid image preview batch");
+            }
+            for request in requests {
+                if !self.conns.contains_key(&conn) {
+                    break;
+                }
+                self.message(conn, ip, ClientMsg::FetchPreview(request.clone()), 0);
+            }
+            return;
+        }
+        if let ClientMsg::FetchPreview(request) = &msg {
+            let Some(c) = self.conns.get(&conn) else { return };
+            let Kind::Joined { file, .. } = &c.kind else { return self.kick(&[conn], "join a file before requesting previews") };
+            if !c.out.previews || !request.valid() {
+                return self.kick(&[conn], "invalid or unnegotiated image preview");
+            }
+            let known = self.rooms.get(file).and_then(|room| room.assets.iter().find(|known| known.same_content(&request.asset)).cloned());
+            let Some(known) = known else { return self.kick(&[conn], "this image is not part of the joined file") };
+            let mut request = request.clone();
+            request.asset.scope.clear();
+            if let Some(bytes) = figcraft_assets::preview::load(&request) {
+                return self.answer(conn, &ServerMsg::Preview { request, bytes: Some(figcraft_assets::Blob(bytes)), error: None });
+            }
+            let source = self
+                .rooms
+                .get(file)
+                .and_then(|room| room.server.replica().asset_payload(&known))
+                .map(Ok)
+                .unwrap_or_else(|| figcraft_assets::cache::load(&known));
+            let out = c.out.clone();
+            let sock = c.sock.try_clone().ok();
+            let reply_request = request.clone();
+            match source {
+                Ok(source) => {
+                    if !crate::previews::submit(
+                        request.clone(),
+                        source,
+                        Box::new(move |result| {
+                            let (bytes, error) = match result {
+                                Ok(b) => (Some(figcraft_assets::Blob(b)), None),
+                                Err(e) => (None, Some(e)),
+                            };
+                            let msg = ServerMsg::Preview { request: reply_request, bytes, error };
+                            if let Some(bytes) = encode(&msg, true)
+                                && out.push(&bytes, &mut Charges::default(), false).is_err()
+                                && let Some(sock) = sock
+                            {
+                                shutdown(&sock);
+                            }
+                        }),
+                    ) {
+                        self.answer(conn, &ServerMsg::Preview { request, bytes: None, error: Some("image preview queue is busy".into()) });
+                    }
+                }
+                _ => self.answer(conn, &ServerMsg::Preview { request, bytes: None, error: Some("image preview is temporarily unavailable".into()) }),
+            }
+            return;
+        }
         if let ClientMsg::FetchAsset(asset) = &msg {
             let Some(c) = self.conns.get(&conn) else { return };
             let Kind::Joined { file, .. } = &c.kind else { return self.kick(&[conn], "join a file before requesting images") };

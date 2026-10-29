@@ -84,6 +84,7 @@ input.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-29 | minor | M9: progressive display previews negotiate on the original-image resource protocol without chunk transport. Bounded workers/caches, explicit preview clearing, main’s local-image display copies and exact-original exports retained. Readiness unchanged. |
 | 2026-10-29 | minor | M9: original-image downloads negotiate independently on main without chunk transport; disk cache capped at 512 MiB, explicit clearing, and a bounded background reader for paint misses. Export/rasterisation explicitly waits for exact originals. Existing image validation and replay limits retained; readiness estimates unchanged. |
 | 2026-10-22 | minor | Scoped immutable original-image references and authorized binary downloads; exact originals remain authoritative for saves/exports. Recovery authority and cache/request regressions covered. No previews. Readiness estimates unchanged. |
 | 2026-10-20 | minor | Added L0 `figcraft-assets`; image payloads can live outside guest document/undo clones in a bounded scoped disk cache. Native transport sends manifests and checked binary payloads; render generations invalidate pixels without document edits. Normal saves remain self-contained. |
