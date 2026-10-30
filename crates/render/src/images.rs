@@ -52,9 +52,16 @@ pub fn require_for_nodes(doc: &Document, ids: &[NodeId]) -> Result<figcraft_asse
             continue;
         }
         stack.extend(node.children.iter().copied());
-        let mut paints: Vec<_> = node.fills.iter().chain(&node.strokes).collect();
-        if let figcraft_doc::NodeKind::Vector { network } = &node.kind {
-            paints.extend(network.regions.iter().flat_map(|region| region.fills.iter().flatten()));
+        let mut paints: Vec<_> = node.strokes.iter().collect();
+        match &node.kind {
+            figcraft_doc::NodeKind::Vector { network }
+                if network.regions.iter().any(|region| region.fills.is_some() || region.paint_space.is_some()) =>
+            {
+                // Match canvas/PDF/SVG: explicit region paints replace the node's fills;
+                // only regions without paints fall back to those node fills.
+                paints.extend(network.regions.iter().flat_map(|region| region.fills.as_deref().unwrap_or(&node.fills)));
+            }
+            _ => paints.extend(&node.fills),
         }
         if let figcraft_doc::NodeKind::Text(text) = &node.kind {
             paints.extend(text.style.fills.iter().flatten());
