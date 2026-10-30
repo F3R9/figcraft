@@ -342,7 +342,16 @@ pub fn load(asset: &AssetRef) -> Result<Arc<Vec<u8>>, String> {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn store(asset: &AssetRef, bytes: &[u8]) -> Result<(), String> {
-    disk().write(asset, bytes)?;
+    store_download(disk(), asset, bytes)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn store_download(cache: &DiskCache, asset: &AssetRef, bytes: &[u8]) -> Result<(), String> {
+    if !asset.verify(bytes) {
+        return Err("invalid image checksum or length".into());
+    }
+    // Persistence is disposable. Verified downloads remain usable on read-only/full disks.
+    let _ = cache.write_verified(asset, bytes);
     remember(asset, Arc::new(bytes.to_vec()));
     ready(asset);
     notify_changed();
@@ -353,8 +362,16 @@ pub fn store(asset: &AssetRef, bytes: &[u8]) -> Result<(), String> {
 /// Reads still validate payloads; metadata is only a fast path for redundant cache insertion.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn store_resident(asset: &AssetRef, bytes: &Arc<Vec<u8>>) -> Result<(), String> {
-    if disk().write_arc(asset, bytes)? {
-        ready(asset);
+    if !asset.valid() || !asset.same_content(&AssetRef::of_arc(bytes)) {
+        return Err("invalid image checksum or length".into());
+    }
+    match disk().write_arc(asset, bytes) {
+        Ok(true) => ready(asset),
+        Ok(false) => {}
+        Err(_) => {
+            remember(asset, bytes.clone());
+            ready(asset);
+        }
     }
     Ok(())
 }
@@ -484,11 +501,18 @@ impl DiskCache {
     }
 
     pub fn write(&self, asset: &AssetRef, bytes: &[u8]) -> Result<(), String> {
+        if !asset.verify(bytes) {
+            return Err("invalid image checksum or length".into());
+        }
+        self.write_verified(asset, bytes)
+    }
+
+    fn write_verified(&self, asset: &AssetRef, bytes: &[u8]) -> Result<(), String> {
         use std::io::Write;
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        if !asset.verify(bytes) || asset.len > self.max {
-            return Err("invalid image checksum, length or cache budget".into());
+        if asset.len > self.max {
+            return Err("image exceeds the disk cache budget".into());
         }
         self.verified.lock().unwrap_or_else(PoisonError::into_inner).remove(&asset.cache_key());
         std::fs::create_dir_all(&self.root).map_err(|e| e.to_string())?;
@@ -584,6 +608,20 @@ fn read_bytes(path: &std::path::Path, asset: &AssetRef) -> Result<Arc<Vec<u8>>, 
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    #[test]
+    fn review_followup_verified_downloads_survive_disk_failure_but_corruption_does_not() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let cache = DiskCache::new(file.path().into(), 1024); // A file cannot be a cache directory.
+        let bytes = b"synthetic memory-only download after disk error";
+        let asset = AssetRef::of(bytes);
+        assert!(cache.write(&asset, bytes).is_err());
+        store_download(&cache, &asset, bytes).unwrap();
+        assert_eq!(load(&asset).unwrap().as_slice(), bytes);
+        assert_eq!(display(&asset).unwrap().as_slice(), bytes);
+        assert!(store_download(&cache, &asset, b"bad checksum").is_err());
+        assert_eq!(load(&asset).unwrap().as_slice(), bytes);
+    }
+
     #[test]
     fn warming_host_sources_does_not_signal_a_download_but_valid_downloads_do() {
         use std::sync::atomic::{AtomicUsize, Ordering};

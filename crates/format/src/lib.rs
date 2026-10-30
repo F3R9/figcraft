@@ -297,7 +297,7 @@ impl<'de> Deserialize<'de> for RemoteImages {
                 use serde::de::Error;
                 let mut images = BTreeMap::new();
                 while let Some(key) = map.next_key::<String>()? {
-                    if images.len() >= 20_000 || key.len() > 256 {
+                    if images.len() >= 20_000 || !ImageData::is_valid_key(&key) {
                         return Err(A::Error::custom("remote image index exceeds the limit"));
                     }
                     let image: RemoteImage = map.next_value()?;

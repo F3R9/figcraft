@@ -201,3 +201,16 @@ fn review_ordinary_save_strips_scopes_from_main_versions_and_branches() {
     assert!(portable.branches[0].head.images[&key].asset.is_none());
     assert!(doc.images[&key].asset.is_some(), "saving must not mutate the source");
 }
+
+#[test]
+fn review_followup_recovery_cannot_introduce_path_like_image_keys() {
+    let asset = figcraft_assets::AssetRef::of(b"synthetic recovery image");
+    for key in ["../escape", "a/b", "", &"x".repeat(129)] {
+        let mut value = to_json(&Document::new("Synthetic recovery names")).unwrap();
+        value["remoteImageIndex"] = json!({key: {"width": 1, "height": 1, "asset": asset}});
+        assert!(load_recovery_bytes_with_versions(&serde_json::to_vec(&value).unwrap()).is_err(), "{key:?}");
+    }
+    let mut value = to_json(&Document::new("Valid recovery name")).unwrap();
+    value["remoteImageIndex"] = json!({"valid-name_1": {"width": 1, "height": 1, "asset": asset}});
+    assert!(load_recovery_bytes_with_versions(&serde_json::to_vec(&value).unwrap()).is_ok());
+}

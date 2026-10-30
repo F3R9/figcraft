@@ -48,7 +48,7 @@ pub fn require_for_nodes(doc: &Document, ids: &[NodeId]) -> Result<figcraft_asse
             continue;
         }
         let Some(node) = doc.node(id) else { continue };
-        if !node.visible {
+        if !node.visible || node.opacity <= 0.0 {
             continue;
         }
         stack.extend(node.children.iter().copied());
@@ -62,7 +62,7 @@ pub fn require_for_nodes(doc: &Document, ids: &[NodeId]) -> Result<figcraft_asse
                 paints.extend(run.style.fills.iter().flatten());
             }
         }
-        for paint in paints.into_iter().filter(|paint| paint.visible) {
+        for paint in paints.into_iter().filter(|paint| paint.visible && paint.opacity > 0.0) {
             match &paint.kind {
                 PaintKind::Pattern(pattern) => stack.push(NodeId(pattern.source)),
                 PaintKind::Image(image) => {
