@@ -214,3 +214,34 @@ fn review_followup_recovery_cannot_introduce_path_like_image_keys() {
     value["remoteImageIndex"] = json!({"valid-name_1": {"width": 1, "height": 1, "asset": asset}});
     assert!(load_recovery_bytes_with_versions(&serde_json::to_vec(&value).unwrap()).is_ok());
 }
+
+#[test]
+fn review_final_ordinary_archive_cannot_hide_a_remote_scope_behind_a_history_image() {
+    use std::io::Read;
+    let doc = Document::new("Synthetic scope smuggling");
+    let mut history = doc.clone();
+    let (key, _, _) = add_image(&mut history, png()).unwrap();
+    let version = Version::new("v", "Version", "", 0, Arc::new(history));
+    let archive = save_bytes_with_versions(&doc, None, &[version]).unwrap();
+    assert!(load_bytes_with_versions(&archive).is_ok());
+    let mut input = zip::ZipArchive::new(std::io::Cursor::new(&archive)).unwrap();
+    let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for i in 0..input.len() {
+        let mut entry = input.by_index(i).unwrap();
+        let name = entry.name().to_string();
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data).unwrap();
+        if name == "document.json" {
+            let mut value: Value = serde_json::from_slice(&data).unwrap();
+            let mut foreign = figcraft_assets::AssetRef::of(b"other file's cached original");
+            foreign.scope = figcraft_assets::file_scope("wss://scope.example/", "other");
+            value["remoteImageIndex"] = json!({key.clone(): {"width": 2, "height": 2, "asset": foreign}});
+            value["imageIndex"] = json!([]); // K exists only in the version and archive members.
+            data = serde_json::to_vec(&value).unwrap();
+        }
+        out.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+        out.write_all(&data).unwrap();
+    }
+    let hostile = out.finish().unwrap().into_inner();
+    assert!(load_bytes_with_versions(&hostile).unwrap_err().to_string().contains("external cache"));
+}

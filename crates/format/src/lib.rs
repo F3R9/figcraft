@@ -857,10 +857,12 @@ fn load_within_mode(bytes: &[u8], budget: ImageBudget, total: u64, references_al
     let mut unpacked = Unpacked::new(total);
     let text = String::from_utf8(unpacked.read(&mut z, "document.json", limit)?).map_err(|e| FormatError::Corrupt(e.to_string()))?;
     let (mut doc, mut issues, own_images) = parse_json(&text)?;
-    let ImagesRead { mut images, unread, past_budget } = read_images(&mut z, own_images.as_ref(), budget, &mut unpacked);
-    if !references_allowed && doc.images.keys().any(|key| !images.contains_key(key)) {
+    // Even an embedded member with the same key cannot authorize a caller-selected cache
+    // scope. History-only filtering must never leave a remote reference in a normal file.
+    if !references_allowed && doc.images.values().any(|image| image.asset.is_some()) {
         return Err(external_images());
     }
+    let ImagesRead { mut images, unread, past_budget } = read_images(&mut z, own_images.as_ref(), budget, &mut unpacked);
     for (key, image) in &doc.images {
         images.entry(key.clone()).or_insert_with(|| image.clone());
     }
