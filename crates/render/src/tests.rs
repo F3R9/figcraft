@@ -565,6 +565,15 @@ fn review_required_images_skip_hidden_descendants_but_follow_region_patterns() {
     doc.get_mut(hidden).unwrap().fills = doc.node(source).unwrap().fills.clone();
     doc.get_mut(hidden).unwrap().visible = false;
     assert!(crate::images::require_for_nodes(&doc, &[frame]).is_ok());
+    doc.get_mut(hidden).unwrap().visible = true;
+    doc.get_mut(hidden).unwrap().opacity = 0.0;
+    assert!(crate::images::require_for_nodes(&doc, &[frame]).is_ok());
+    doc.get_mut(hidden).unwrap().opacity = 1.0;
+    doc.get_mut(hidden).unwrap().fills[0].opacity = 0.0;
+    assert!(crate::images::require_for_nodes(&doc, &[frame]).is_ok());
+    doc.get_mut(hidden).unwrap().fills[0].opacity = 1.0;
+    assert!(crate::images::require_for_nodes(&doc, &[frame]).is_err());
+    doc.get_mut(hidden).unwrap().visible = false;
     let mut net = VectorNetwork::default();
     net.regions.push(Region { fills: Some(vec![Paint::pattern(source.0)]), ..Default::default() });
     let _vector = doc.create(frame, NodeKind::Vector { network: net }, "Region pattern", 0.0, 0.0, 10.0, 10.0).unwrap();

@@ -100,6 +100,25 @@ struct Conn {
     ip: IpAddr,
 }
 
+/// Bounded authorization: current originals first, new references next, then old history.
+/// Imported files and a batch with many transient images cannot grow the persisted catalog.
+fn image_catalog(
+    doc: &figcraft_doc::Document,
+    added: impl IntoIterator<Item = figcraft_assets::AssetRef>,
+    old: impl IntoIterator<Item = figcraft_assets::AssetRef>,
+) -> std::collections::BTreeSet<figcraft_assets::AssetRef> {
+    let mut catalog = std::collections::BTreeSet::new();
+    let current = doc.images.values().take(20_000).map(|image| image.reference());
+    for mut asset in current.chain(added).chain(old) {
+        if catalog.len() >= 40_000 {
+            break;
+        }
+        asset.scope.clear();
+        catalog.insert(asset);
+    }
+    catalog
+}
+
 /// One open file's session.
 struct Room {
     assets: std::collections::BTreeSet<figcraft_assets::AssetRef>,
@@ -117,17 +136,7 @@ struct Room {
 
 impl Room {
     fn new(server: Server) -> Self {
-        let assets = server
-            .replica()
-            .document()
-            .images
-            .values()
-            .map(|image| {
-                let mut asset = image.reference();
-                asset.scope.clear();
-                asset
-            })
-            .collect();
+        let assets = image_catalog(server.replica().document(), [], []);
         Self { assets, server, ids: BTreeMap::new(), throttles: BTreeMap::new(), latest: BTreeMap::new(), guests: 0, local: None }
     }
 
@@ -761,25 +770,7 @@ impl<B: Backend> Hub<B> {
                     .filter(|asset| !room.assets.contains(asset))
                     .collect();
                 if !added.is_empty() {
-                    let mut catalog: std::collections::BTreeSet<_> = room
-                        .server
-                        .replica()
-                        .document()
-                        .images
-                        .values()
-                        .map(|image| {
-                            let mut asset = image.reference();
-                            asset.scope.clear();
-                            asset
-                        })
-                        .collect();
-                    catalog.extend(added);
-                    for asset in &room.assets {
-                        if catalog.len() >= 40_000 {
-                            break;
-                        }
-                        catalog.insert(asset.clone());
-                    }
+                    let catalog = image_catalog(room.server.replica().document(), added, room.assets.iter().cloned());
                     let catalog: Vec<_> = catalog.into_iter().collect();
                     if let Err(reason) = self.backend.remember_assets(&file, &catalog) {
                         log::error!("file {file}: image authorization couldn't be persisted: {reason}");
