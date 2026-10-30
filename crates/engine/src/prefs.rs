@@ -29,6 +29,9 @@ pub struct Prefs {
     pub highlight_on_hover: bool,
     pub number_keys_opacity: bool,
     pub show_dimensions: bool,
+    /// A mouse wheel zooms the canvas about the pointer, and Cmd/Ctrl+wheel scrolls it (off: the
+    /// other way round). Trackpads are unchanged.
+    pub scroll_wheel_zoom: bool,
     /// "system" by default; an explicit "light" or "dark" choice stays saved.
     pub theme: String,
     /// The widths of the main window's left and right panels (the interface keeps them within its
@@ -99,11 +102,20 @@ pub struct Prefs {
     /// files opened or made later start with them. Missing: the toggle's default.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub view: BTreeMap<String, bool>,
+    /// The board canvas's background grid (`board.grid`).
+    #[serde(deserialize_with = "crate::board_grid::read")]
+    pub board_grid: crate::board_grid::BoardGrid,
     /// Recently run actions (the Actions palette's Recents), newest first, at most
     /// [`MAX_RECENT_ACTIONS`]. Entries are `command:<id>`, `plugin:<plugin>/<command>` or
     /// `widget:<plugin>`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recent_actions: Vec<String>,
+    /// The team libraries you added (`library.add`) or checked (`library.check`), as hashes of
+    /// their links (which carry tokens), newest first, at most
+    /// [`MAX_TEAM_LIBRARIES`](crate::library_server::MAX_TEAM_LIBRARIES): only these are checked
+    /// for updates by themselves. A file naming another one doesn't contact its server (#1097).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub team_libraries: Vec<String>,
 }
 
 /// Recently run actions kept for the Actions palette (newest first).
@@ -119,6 +131,7 @@ impl Default for Prefs {
             highlight_on_hover: true,
             number_keys_opacity: true,
             show_dimensions: true,
+            scroll_wheel_zoom: false,
             theme: "system".into(),
             panel_widths: (240.0, 240.0),
             pages_height: None,
@@ -141,7 +154,9 @@ impl Default for Prefs {
             home_sort: "modified".into(),
             home_order: "desc".into(),
             view: BTreeMap::new(),
+            board_grid: Default::default(),
             recent_actions: Vec::new(),
+            team_libraries: Vec::new(),
         }
     }
 }

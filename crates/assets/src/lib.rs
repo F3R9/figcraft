@@ -1,5 +1,6 @@
 //! Image payloads are independent of document operations. References are small, immutable and
 //! checked by content, and the native cache keeps their encoded files out of undo snapshots.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -83,6 +84,19 @@ impl AssetRef {
     }
 }
 
+/// Local cache scope for a WebSocket endpoint and file. Normalize its implicit port and
+/// trailing path slash exactly as a native invite does; tokens/queries never identify a file.
+pub fn file_scope(server: &str, file: &str) -> String {
+    let server = server.split('?').next().unwrap_or_default().trim();
+    let (scheme, rest) = server.split_once("://").unwrap_or(("ws", server));
+    let (host, path) = rest.find('/').map(|i| rest.split_at(i)).unwrap_or((rest, "/"));
+    let port = if scheme.eq_ignore_ascii_case("wss") { "443" } else { "80" };
+    let has_port = if host.starts_with('[') { host.rsplit_once(']').is_some_and(|(_, tail)| tail.starts_with(':')) } else { host.contains(':') };
+    let host = if has_port { host.to_string() } else { format!("{host}:{port}") };
+    let path = if path.ends_with('/') { path.to_string() } else { format!("{path}/") };
+    AssetRef::of(format!("{}://{host}{path}\n{file}", scheme.to_ascii_lowercase()).as_bytes()).sha256
+}
+
 /// Serializes as raw binary bytes with postcard, without base64 or per-byte integer encoding.
 /// Cloning an operation only clones this pointer, never its image payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -159,6 +173,7 @@ pub fn require(bytes: &Arc<Vec<u8>>, asset: Option<&AssetRef>) -> Result<Arc<Vec
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     #[test]

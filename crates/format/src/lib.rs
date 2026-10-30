@@ -56,6 +56,9 @@ const MAX_DOCUMENT: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_DOCUMENT: u64 = 1024 * 1024 * 1024;
 /// Most versions a file keeps: saving more is refused, extra entries in a file are skipped.
 pub const MAX_VERSIONS: usize = 100;
+/// The export warning for colour calculations that resolve to nothing (an operand missing, or more
+/// than 32 variables to read), shared by the Penpot and `.fig` exports.
+pub(crate) const CALCULATIONS_LEFT_OUT: &str = "colour calculations that don't resolve were left out";
 /// Longest version name and description kept (chars).
 pub const MAX_VERSION_NAME: usize = 200;
 pub const MAX_VERSION_DESCRIPTION: usize = 2000;
@@ -64,6 +67,16 @@ const MAX_VERSION_INDEX: u64 = 16 * 1024 * 1024;
 const MAX_VERSION_BYTES: u64 = 1024 * 1024 * 1024;
 /// Most images, and image bytes together, read from one file (members past it are left out).
 const IMAGE_BUDGET: ImageBudget = ImageBudget { images: 20_000, bytes: 4 * 1024 * 1024 * 1024 };
+/// Most bytes one open of a `.figcraft` file unpacks, every area together: its document, images,
+/// published library, version history and branches ([`Unpacked`], #1079). Each area keeps its own
+/// cap; their sum was about 10 GB. Read in that order, the document (a 900 000-layer one unpacks
+/// to 1.5 GB) and the images up to their own 4 GiB cap fit, so a file whose images pass that cap
+/// (#1313: an 84 MiB document with 7.3 GiB of images) keeps as many as before; the history and
+/// branches share what is left. 32-bit targets (wasm32) have 4 GB of address space in all.
+#[cfg(not(target_pointer_width = "32"))]
+const MAX_UNPACKED: u64 = 6 * 1024 * 1024 * 1024;
+#[cfg(target_pointer_width = "32")]
+const MAX_UNPACKED: u64 = 2 * 1024 * 1024 * 1024;
 const BRANCH_INDEX: &str = "branches/index.json";
 /// Most branches a file keeps: making more is refused, extra entries in a file are skipped.
 pub const MAX_BRANCHES: usize = 100;
@@ -242,14 +255,14 @@ struct DocumentJson<'a> {
     #[serde(rename = "imageIndex", serialize_with = "image_index")]
     images: &'a BTreeMap<String, ImageData>,
     #[serde(rename = "remoteImageIndex", serialize_with = "remote_index", skip_serializing_if = "no_remote_images")]
-    remote: &'a BTreeMap<String, ImageData>,
+    remote: Option<&'a BTreeMap<String, ImageData>>,
     #[serde(flatten)]
     doc: &'a Document,
 }
 
 impl<'a> DocumentJson<'a> {
-    fn new(doc: &'a Document) -> Self {
-        Self { format: FORMAT, version: VERSION, images: &doc.images, remote: &doc.images, doc }
+    fn new(doc: &'a Document, references_only: bool) -> Self {
+        Self { format: FORMAT, version: VERSION, images: &doc.images, remote: references_only.then_some(&doc.images), doc }
     }
 }
 
@@ -260,12 +273,12 @@ struct RemoteImage {
     asset: figcraft_assets::AssetRef,
 }
 
-fn no_remote_images(images: &&BTreeMap<String, ImageData>) -> bool {
-    images.values().all(|image| image.asset.is_none())
+fn no_remote_images(images: &Option<&BTreeMap<String, ImageData>>) -> bool {
+    images.is_none_or(|images| images.values().all(|image| image.asset.is_none()))
 }
 
-fn remote_index<S: Serializer>(images: &&BTreeMap<String, ImageData>, serializer: S) -> Result<S::Ok, S::Error> {
-    serializer.collect_map(images.iter().filter_map(|(key, image)| {
+fn remote_index<S: Serializer>(images: &Option<&BTreeMap<String, ImageData>>, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_map(images.iter().flat_map(|images| images.iter()).filter_map(|(key, image)| {
         image.asset.as_ref().map(|asset| (key, RemoteImage { width: image.width, height: image.height, asset: asset.clone() }))
     }))
 }
@@ -491,13 +504,13 @@ impl<S: serde::ser::SerializeStructVariant> serde::ser::SerializeStructVariant f
 /// Serialize the document (without images) to the JSON value stored in `document.json`.
 /// NaN and infinite numbers are written as `0`.
 pub fn to_json(doc: &Document) -> Result<Value, FormatError> {
-    DocumentJson::new(doc).serialize(Finite(serde_json::value::Serializer)).map_err(io_err)
+    DocumentJson::new(doc, false).serialize(Finite(serde_json::value::Serializer)).map_err(io_err)
 }
 
 /// Write the document (without images) as `document.json` content to `w`.
 /// NaN and infinite numbers are written as `0`.
 pub fn write_json(doc: &Document, w: impl Write) -> Result<(), FormatError> {
-    DocumentJson::new(doc).serialize(Finite(&mut serde_json::Serializer::new(w))).map_err(io_err)
+    DocumentJson::new(doc, false).serialize(Finite(&mut serde_json::Serializer::new(w))).map_err(io_err)
 }
 
 /// Parse `document.json` content.
@@ -609,11 +622,11 @@ pub fn zip_files<'a>(files: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> Re
 }
 
 /// Add `doc` as a `document.json`-style member, serialized straight into the compressor.
-fn put_json<W: Write + Seek>(z: &mut zip::ZipWriter<W>, name: &str, doc: &Document) -> Result<(), FormatError> {
+fn put_json<W: Write + Seek>(z: &mut zip::ZipWriter<W>, name: &str, doc: &Document, references_only: bool) -> Result<(), FormatError> {
     z.start_file(name, json_options()).map_err(io_err)?;
     // The serializer writes many small pieces: batch them before they reach the compressor.
     let mut w = std::io::BufWriter::with_capacity(1 << 16, z);
-    write_json(doc, &mut w)?;
+    DocumentJson::new(doc, references_only).serialize(Finite(&mut serde_json::Serializer::new(&mut w))).map_err(io_err)?;
     w.flush().map_err(io_err)
 }
 
@@ -660,7 +673,7 @@ fn save_history(
     {
         let mut z = zip::ZipWriter::new(&mut buf);
         let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-        put_json(&mut z, "document.json", doc)?;
+        put_json(&mut z, "document.json", doc, references_only)?;
         // Every image once, whether the document, a version or a branch uses it.
         let mut written = BTreeSet::new();
         let branch_images = branches.iter().flat_map(|b| [&b.base.images, &b.head.images].into_iter().chain(b.versions.iter().map(Version::images)));
@@ -676,7 +689,7 @@ fn save_history(
         if let Some(t) = thumbnail_png {
             put(&mut z, "thumbnail.png", stored, t)?;
         }
-        put_versions(&mut z, "versions", versions)?;
+        put_versions(&mut z, "versions", versions, references_only)?;
         if !branches.is_empty() {
             let mut ids = BTreeSet::new();
             let mut index = Vec::with_capacity(branches.len());
@@ -684,9 +697,9 @@ fn save_history(
                 if !is_valid_version_id(&b.id) || !ids.insert(b.id.as_str()) {
                     return Err(FormatError::Io(format!("invalid or duplicate branch id `{}`", b.id)));
                 }
-                put_json(&mut z, &format!("branches/{}/base.json", b.id), &b.base)?;
-                put_json(&mut z, &format!("branches/{}/head.json", b.id), &b.head)?;
-                put_versions(&mut z, &format!("branches/{}/versions", b.id), &b.versions)?;
+                put_json(&mut z, &format!("branches/{}/base.json", b.id), &b.base, references_only)?;
+                put_json(&mut z, &format!("branches/{}/head.json", b.id), &b.head, references_only)?;
+                put_versions(&mut z, &format!("branches/{}/versions", b.id), &b.versions, references_only)?;
                 let images = |d: &Document| d.images.keys().cloned().collect::<Vec<String>>();
                 index.push(json!({"id": b.id, "name": b.name, "time": b.time, "client": b.client, "state": b.state,
                     "baseImages": images(&b.base), "headImages": images(&b.head)}));
@@ -703,7 +716,7 @@ fn save_history(
 
 /// Write version history `versions` (oldest first) under `dir`: `<dir>/index.json` and one
 /// `<dir>/<id>.json` snapshot per version. Nothing when there are none.
-fn put_versions<W: Write + Seek>(z: &mut zip::ZipWriter<W>, dir: &str, versions: &[Version]) -> Result<(), FormatError> {
+fn put_versions<W: Write + Seek>(z: &mut zip::ZipWriter<W>, dir: &str, versions: &[Version], references_only: bool) -> Result<(), FormatError> {
     if versions.is_empty() {
         return Ok(());
     }
@@ -715,8 +728,16 @@ fn put_versions<W: Write + Seek>(z: &mut zip::ZipWriter<W>, dir: &str, versions:
         }
         let name = format!("{dir}/{}.json", v.id);
         match &v.snapshot {
-            Snapshot::Doc(d) => put_json(z, &name, d)?,
-            Snapshot::Stored { json, .. } => put(z, &name, json_options(), json)?,
+            Snapshot::Doc(d) => put_json(z, &name, d, references_only)?,
+            Snapshot::Stored { json, .. } => {
+                // Ordinary historical JSON is already self-contained; only recovery snapshots
+                // need reserialization to strip cache capabilities. Avoid parsing all history.
+                if !references_only && json.windows(b"\"remoteImageIndex\"".len()).any(|w| w == b"\"remoteImageIndex\"") {
+                    put_json(z, &name, v.document()?.as_ref(), false)?;
+                } else {
+                    put(z, &name, json_options(), json)?;
+                }
+            }
         }
         let images: Vec<&String> = v.images().keys().collect();
         let mut entry = json!({"id": v.id, "name": v.name, "description": v.description, "time": v.time, "images": images});
@@ -749,6 +770,42 @@ pub(crate) fn read_member<R: Read + Seek>(z: &mut zip::ZipArchive<R>, name: &str
     Ok(data)
 }
 
+/// What one file open may still unpack, every area together ([`MAX_UNPACKED`]).
+pub(crate) struct Unpacked {
+    left: u64,
+    total: u64,
+}
+
+impl Unpacked {
+    pub(crate) fn new(total: u64) -> Self {
+        Self { left: total, total }
+    }
+
+    /// Why a member is left out once the total is spent.
+    fn passed(&self) -> String {
+        match self.total / (1024 * 1024) {
+            0 => format!("too large: the file's contents together pass {} bytes", self.total),
+            mb => format!("too large: the file's contents together pass {mb} MB"),
+        }
+    }
+
+    /// Whether member `name` (by its recorded size) needs more than is left.
+    fn exceeded<R: Read + Seek>(&self, z: &mut zip::ZipArchive<R>, name: &str) -> bool {
+        z.by_name(name).is_ok_and(|f| f.size() > self.left)
+    }
+
+    /// [`read_member`] within `limit` (the area's own cap) and what is left of the total, which the
+    /// member then uses up.
+    pub(crate) fn read<R: Read + Seek>(&mut self, z: &mut zip::ZipArchive<R>, name: &str, limit: u64) -> Result<Vec<u8>, FormatError> {
+        if self.exceeded(z, name) && z.by_name(name).is_ok_and(|f| f.size() <= limit) {
+            return Err(FormatError::Corrupt(format!("{name}: {}", self.passed())));
+        }
+        let data = read_member(z, name, limit.min(self.left))?;
+        self.left = self.left.saturating_sub(data.len() as u64);
+        Ok(data)
+    }
+}
+
 /// Largest `document.json` read from an archive of `len` bytes in which it takes `packed`.
 pub(crate) fn document_limit(packed: u64, len: u64) -> u64 {
     packed.min(len).saturating_mul(DOCUMENT_RATIO).clamp(MAX_MEMBER, MAX_DOCUMENT)
@@ -768,16 +825,21 @@ pub fn load_bytes_with_versions(bytes: &[u8]) -> Result<Loaded, FormatError> {
 
 /// [`load_bytes_with_versions`] reading at most `budget` of images.
 pub(crate) fn load_within(bytes: &[u8], budget: ImageBudget) -> Result<Loaded, FormatError> {
-    load_within_mode(bytes, budget, false)
+    load_limited(bytes, budget, MAX_UNPACKED)
 }
 
 /// Only for copies found in the application's private Recovery directory. Arbitrary opened
 /// files cannot choose a cache scope or use a cache digest as authority to read another file.
 pub fn load_recovery_bytes_with_versions(bytes: &[u8]) -> Result<Loaded, FormatError> {
-    load_within_mode(bytes, IMAGE_BUDGET, true)
+    load_within_mode(bytes, IMAGE_BUDGET, MAX_UNPACKED, true)
 }
 
-fn load_within_mode(bytes: &[u8], budget: ImageBudget, references_allowed: bool) -> Result<Loaded, FormatError> {
+/// Read with a cumulative archive budget as well as the image budget.
+pub(crate) fn load_limited(bytes: &[u8], budget: ImageBudget, total: u64) -> Result<Loaded, FormatError> {
+    load_within_mode(bytes, budget, total, false)
+}
+
+fn load_within_mode(bytes: &[u8], budget: ImageBudget, total: u64, references_allowed: bool) -> Result<Loaded, FormatError> {
     let trimmed = bytes.iter().position(|b| !b.is_ascii_whitespace()).and_then(|i| bytes.get(i));
     if trimmed == Some(&b'{') {
         let text = std::str::from_utf8(bytes).map_err(|e| FormatError::Corrupt(e.to_string()))?;
@@ -792,9 +854,10 @@ fn load_within_mode(bytes: &[u8], budget: ImageBudget, references_allowed: bool)
     let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| FormatError::Corrupt(e.to_string()))?;
     let packed = z.by_name("document.json").map(|f| f.compressed_size()).unwrap_or(0);
     let limit = document_limit(packed, bytes.len() as u64);
-    let text = String::from_utf8(read_member(&mut z, "document.json", limit)?).map_err(|e| FormatError::Corrupt(e.to_string()))?;
+    let mut unpacked = Unpacked::new(total);
+    let text = String::from_utf8(unpacked.read(&mut z, "document.json", limit)?).map_err(|e| FormatError::Corrupt(e.to_string()))?;
     let (mut doc, mut issues, own_images) = parse_json(&text)?;
-    let ImagesRead { mut images, unread, past_budget } = read_images(&mut z, own_images.as_ref(), budget);
+    let ImagesRead { mut images, unread, past_budget } = read_images(&mut z, own_images.as_ref(), budget, &mut unpacked);
     if !references_allowed && doc.images.keys().any(|key| !images.contains_key(key)) {
         return Err(external_images());
     }
@@ -803,13 +866,13 @@ fn load_within_mode(bytes: &[u8], budget: ImageBudget, references_allowed: bool)
     }
     report_lost_images(&mut issues, &unread, &past_budget, own_images.as_ref(), &images);
     let images_past_budget = past_budget.len();
-    match library::read(&mut z, &images, u64::MAX) {
+    match library::read(&mut z, &images, &mut unpacked) {
         Ok(lib) => doc.published = lib.map(Arc::new),
         Err(e) => issues.push(format!("the published library was skipped: {e}")),
     }
     let mut budget = MAX_VERSION_BYTES;
-    let versions = read_versions(&mut z, "versions", &images, &mut issues, &mut budget, references_allowed);
-    let branches = read_branches(&mut z, &images, &mut issues, references_allowed);
+    let versions = read_versions(&mut z, "versions", &images, &mut issues, &mut budget, references_allowed, &mut unpacked);
+    let branches = read_branches(&mut z, &images, &mut issues, references_allowed, &mut unpacked);
     // Images only the version history or branches use stay with them.
     let branch_images =
         branches.iter().flat_map(|b| b.base.images.keys().chain(b.head.images.keys()).chain(b.versions.iter().flat_map(|v| v.images().keys())));
@@ -826,7 +889,12 @@ fn load_within_mode(bytes: &[u8], budget: ImageBudget, references_allowed: bool)
 /// The archive's `images/` members by hash, within `budget`, and the ones that couldn't be read
 /// with why. The document's own images (`own`) are read first, so a file past the budget loses
 /// the images only its history uses before its own.
-fn read_images<R: Read + Seek>(z: &mut zip::ZipArchive<R>, own: Option<&BTreeSet<String>>, budget: ImageBudget) -> ImagesRead {
+fn read_images<R: Read + Seek>(
+    z: &mut zip::ZipArchive<R>,
+    own: Option<&BTreeSet<String>>,
+    budget: ImageBudget,
+    unpacked: &mut Unpacked,
+) -> ImagesRead {
     let mut hashes: Vec<String> = z.file_names().filter_map(|n| n.strip_prefix("images/")).filter(|h| !h.is_empty()).map(str::to_string).collect();
     hashes.sort_by_key(|h| !own.is_some_and(|o| o.contains(h)));
     let mut images = BTreeMap::new();
@@ -854,7 +922,14 @@ fn read_images<R: Read + Seek>(z: &mut zip::ZipArchive<R>, own: Option<&BTreeSet
             unread.push((hash, FormatError::Corrupt(format!("the file's images together pass {mb} MB"))));
             continue;
         }
-        match read_member(z, &name, left.min(MAX_MEMBER)) {
+        // Past the file's total, an image is left out as one past the images' own budget: it stays
+        // in the file, which can't then be saved over without losing it (#1313).
+        if unpacked.exceeded(z, &name) {
+            past_budget.insert(hash.clone());
+            unread.push((hash, FormatError::Corrupt(unpacked.passed())));
+            continue;
+        }
+        match unpacked.read(z, &name, left.min(MAX_MEMBER)) {
             Ok(data) => {
                 left = left.saturating_sub(data.len() as u64);
                 images.insert(hash, image_data(data));
@@ -919,12 +994,14 @@ fn read_versions<R: Read + Seek>(
     issues: &mut Vec<String>,
     budget: &mut u64,
     references_allowed: bool,
+    unpacked: &mut Unpacked,
 ) -> Vec<Version> {
     let index_name = format!("{dir}/index.json");
     if z.index_for_name(&index_name).is_none() {
         return Vec::new();
     }
-    let index = match read_member(z, &index_name, MAX_VERSION_INDEX)
+    let index = match unpacked
+        .read(z, &index_name, MAX_VERSION_INDEX)
         .and_then(|b| serde_json::from_slice::<Value>(&b).map_err(|e| FormatError::Corrupt(e.to_string())))
     {
         Ok(v) => v,
@@ -945,7 +1022,7 @@ fn read_versions<R: Read + Seek>(
             issues.push("a version with an invalid id was skipped".into());
             continue;
         }
-        let json = match read_member(z, &format!("{dir}/{id}.json"), (*budget).min(MAX_MEMBER)) {
+        let json = match unpacked.read(z, &format!("{dir}/{id}.json"), (*budget).min(MAX_MEMBER)) {
             Ok(j) => j,
             Err(err) => {
                 issues.push(format!("version `{id}` was skipped: {err}"));
@@ -991,11 +1068,13 @@ fn read_branches<R: Read + Seek>(
     images: &BTreeMap<String, ImageData>,
     issues: &mut Vec<String>,
     references_allowed: bool,
+    unpacked: &mut Unpacked,
 ) -> Vec<Branch> {
     if z.index_for_name(BRANCH_INDEX).is_none() {
         return Vec::new();
     }
-    let index = match read_member(z, BRANCH_INDEX, MAX_VERSION_INDEX)
+    let index = match unpacked
+        .read(z, BRANCH_INDEX, MAX_VERSION_INDEX)
         .and_then(|b| serde_json::from_slice::<Value>(&b).map_err(|e| FormatError::Corrupt(e.to_string())))
     {
         Ok(v) => v,
@@ -1018,7 +1097,7 @@ fn read_branches<R: Read + Seek>(
             continue;
         }
         let mut snapshot = |part: &str, list: &str| -> Result<Arc<Document>, FormatError> {
-            let json = read_member(z, &format!("branches/{id}/{part}.json"), budget.min(MAX_MEMBER))?;
+            let json = unpacked.read(z, &format!("branches/{id}/{part}.json"), budget.min(MAX_MEMBER))?;
             budget = budget.saturating_sub(json.len() as u64);
             let (mut doc, _, _) = parse_json(std::str::from_utf8(&json).map_err(|e| FormatError::Corrupt(e.to_string()))?)?;
             let hashes = e.get(list).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
@@ -1041,7 +1120,7 @@ fn read_branches<R: Read + Seek>(
             time: e.get("time").and_then(Value::as_u64).unwrap_or(0),
             client: e.get("client").and_then(Value::as_u64).and_then(|c| u32::try_from(c).ok()).unwrap_or(0),
             state: e.get("state").and_then(|s| BranchState::deserialize(s).ok()).unwrap_or(BranchState::Active),
-            versions: read_versions(z, &format!("branches/{id}/versions"), images, issues, &mut budget, references_allowed),
+            versions: read_versions(z, &format!("branches/{id}/versions"), images, issues, &mut budget, references_allowed, unpacked),
             base,
             head,
         });
@@ -1120,6 +1199,8 @@ mod large_tests;
 mod staging_tests;
 #[cfg(test)]
 mod thumbnail_tests;
+#[cfg(test)]
+mod unpacked_total_tests;
 #[cfg(test)]
 mod version_tests;
 

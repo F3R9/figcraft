@@ -236,7 +236,7 @@ pub struct PointerEvent {
 }
 
 /// The pointer is still within [`DRAG_SLOP_PX`] of where it was pressed.
-fn within_slop(ev: &PointerEvent, start: Point) -> bool {
+pub(crate) fn within_slop(ev: &PointerEvent, start: Point) -> bool {
     (ev.p() - start).hypot() * ev.zoom.max(1e-6) < DRAG_SLOP_PX
 }
 
@@ -557,6 +557,9 @@ pub struct ToolState {
     pub dev_mode: bool,
     /// Pen snap targets, kept while hovering (see `vectoredit::point_snap`).
     pub(crate) pen_targets: Option<crate::vectoredit::point_snap::PenTargets>,
+    /// Vector edit mode's pen: where the last press that started something new (no path being
+    /// drawn) was, and the undo depth before it, so a double-click there takes that edit back.
+    pub(crate) pen_press: Option<(Point, usize)>,
     /// The Scale tool's anchor: column and row (0 start, 1 middle, 2 end) of the point of the
     /// selection box that stays put (`tool.scaleAnchor`).
     pub scale_anchor: (u8, u8),
@@ -575,6 +578,8 @@ pub struct ToolState {
     pub pick_only: bool,
     /// The colour the eyedropper sampled for a colour picker, until the picker takes it.
     pub picked: Option<figcraft_color::Color>,
+    /// The widget layers whose hover styles show while the pointer is over them (a live preview).
+    pub(crate) widget_hover: Vec<NodeId>,
 }
 
 impl ToolState {

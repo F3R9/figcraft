@@ -704,7 +704,7 @@ pub fn select_all_on_focus(ui: &Ui, r: &Response, text: &str) {
 /// with the editor already focused, which then gains no focus). Call it before adding the editor:
 /// the text is selected at once, so a key typed in the frame the edit starts (the frame after a
 /// double-click or F2 is often the one with the first key) replaces it.
-fn select_all_next(ui: &Ui, te_id: Id, text: &str) {
+pub(crate) fn select_all_next(ui: &Ui, te_id: Id, text: &str) {
     ui.data_mut(|d| d.insert_temp(select_all_id(te_id), true));
     select_all(ui, te_id, text);
 }
@@ -1019,6 +1019,54 @@ pub fn checker(painter: &egui::Painter, rect: Rect, cell: f32) {
 /// A paint swatch (with checkerboard under transparent colours).
 pub fn swatch(ui: &mut Ui, paint: &figcraft_color::Paint, size: f32) -> Response {
     swatch_named(ui, paint, size, tr("Color"))
+}
+
+/// A horizontal slider over `range` named `name` for screen readers, with a tick at `mark`.
+/// `value` None = mixed (no knob). Returns the new value (None = double-click: back to the
+/// default) and whether the gesture ended.
+pub fn slider(
+    ui: &mut Ui,
+    id: Id,
+    range: std::ops::RangeInclusive<f64>,
+    mark: Option<f64>,
+    value: Option<f64>,
+    width: f32,
+    name: &str,
+) -> Option<(Option<f64>, bool)> {
+    let t = Tokens::get(ui.ctx());
+    let (min, max) = (*range.start(), *range.end());
+    let (rect, _) = ui.allocate_exact_size(vec2(width, FIELD_H), Sense::hover());
+    let resp = ui.interact(rect, id, Sense::click_and_drag());
+    a11y::slider(&resp, name, value, min, max);
+    let track = Rect::from_center_size(rect.center(), vec2(width - 12.0, 4.0));
+    let span = (max - min).max(1e-9);
+    let x_of = |v: f64| track.min.x + ((v - min) / span).clamp(0.0, 1.0) as f32 * track.width();
+    let p = ui.painter();
+    p.rect_filled(track, CornerRadius::same(2), t.border);
+    if let Some(m) = mark {
+        let dx = x_of(m);
+        p.line_segment([pos2(dx, track.min.y - 3.0), pos2(dx, track.max.y + 3.0)], Stroke::new(1.0, t.border_strong));
+    }
+    if let Some(v) = value {
+        let x = x_of(v);
+        p.rect_filled(Rect::from_min_max(track.min, pos2(x, track.max.y)), CornerRadius::same(2), t.accent);
+        p.circle_filled(pos2(x, track.center().y), 6.0, Color32::WHITE);
+        let ring = if resp.hovered() || resp.dragged() { crate::theme::ACCENT } else { t.border_strong };
+        p.circle_stroke(pos2(x, track.center().y), 6.0, Stroke::new(1.0, ring));
+    }
+    if resp.double_clicked() {
+        return Some((None, true));
+    }
+    if (resp.dragged() || resp.clicked() || resp.drag_started())
+        && let Some(pos) = resp.interact_pointer_pos()
+    {
+        let f = f64::from(((pos.x - track.min.x) / track.width().max(1.0)).clamp(0.0, 1.0));
+        return Some((Some(min + f * span), resp.drag_stopped() || resp.clicked()));
+    }
+    if resp.drag_stopped() {
+        return value.map(|v| (Some(v), true));
+    }
+    None
 }
 
 /// [`swatch`] with the screen reader's name for the field it belongs to, so a panel's swatches

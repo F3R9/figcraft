@@ -15,7 +15,6 @@ replaced.
 | Layer | Crate | Lines | Role |
 |---|---|---|---|
 | L0 | `figcraft-geom` | ~0.5k | Affine transforms, shape path builders (rounded and smoothed corners, polygons, stars, arcs) on kurbo |
-| L0 | `figcraft-color` | ~1.3k | Colours (HSB/HSL, hex/CSS, Display P3), paints (solid, gradients, image), blend modes |
 | L0 | `figcraft-assets` | ~0.6k | Immutable SHA-256 image references, raw binary payloads, scoped bounded encoded-image cache and asynchronous loader hooks; no scene, UI or transport dependency |
 | L0 | `figcraft-color` | ~1.3k | Colours (HSB/HSL, LCH/OKLCH, hex/CSS, Display P3), paints (solid, gradients, image), blend modes |
 | L1 | `figcraft-doc` | ~8.5k | Document model: pages, node tree in a persistent map (`imbl`, stable ids), properties, components, styles, variables, prototype data, comments, versions. Serde everywhere |
@@ -77,7 +76,8 @@ content. Exports: PNG, JPG, WebP, SVG, PDF, code. There is no `.fig` reader yet
 
 Workspace lints deny `unwrap`, `expect`, `panic!` and friends in shipped code; `unsafe_code` is
 forbidden. `figcraft_engine::guard` turns a panicking command into an error and rolls the document
-back; the desktop app also guards each UI frame. Junk-parameter sweeps run every command with bad
+back, and a panic in a `Session::grouped` closure outside any command rolls the group back like a
+failure before the panic continues; the desktop app also guards each UI frame. The browser build can't catch a panic (wasm32 aborts), so there a panic stops the page and its panic hook keeps the files with unsaved changes in local storage for the next page. Junk-parameter sweeps run every command with bad
 input.
 
 ## Revision history

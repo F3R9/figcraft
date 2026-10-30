@@ -284,3 +284,25 @@ fn depth_samples() {
         std::fs::write(format!("{stem}-{name}.png"), figcraft_render::encode_png(&pix).unwrap()).unwrap();
     }
 }
+
+#[test]
+fn review_grouped_export_holds_original_scope_when_preflight_evicts_encoded_images() {
+    let mut doc = Document::new("Synthetic cache eviction PDF");
+    let page = doc.first_page().unwrap();
+    let mut groups = Vec::new();
+    for n in 0..2 {
+        let mut bytes = png(2, 2);
+        bytes.resize(34 << 20, n + 41); // Valid PNG with inert trailing bytes; exceeds encoded cache together.
+        let mut asset = figcraft_assets::AssetRef::of(&bytes);
+        asset.scope = figcraft_assets::file_scope("ws://pdf-test.example/", "eviction");
+        figcraft_assets::cache::store(&asset, &bytes).unwrap();
+        let key = format!("grouped-{n}");
+        doc.images.insert(key.clone(), ImageData { bytes: Arc::new(Vec::new()), asset: Some(asset), width: 2, height: 2 });
+        let rect = doc.create(page, NodeKind::Rectangle, "Image", f64::from(n) * 20.0, 0.0, 10.0, 10.0).unwrap();
+        doc.get_mut(rect).unwrap().fills = vec![Paint::image(key, ImageScaleMode::Fill)];
+        groups.push(vec![rect]);
+    }
+    let pdf = export_groups(&doc, &groups, &PdfOptions::default()).unwrap();
+    let text = String::from_utf8_lossy(&pdf);
+    assert!(text.matches("/Subtype/Image").count() >= 2, "both pages must contain an image");
+}

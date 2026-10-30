@@ -369,3 +369,69 @@ fn resource_negotiation_uses_one_complete_message_above_a_mebibyte_without_chunk
     assert!(doc.images.values().all(|i| i.bytes.is_empty() && i.asset.is_some()));
     let _ = ws.close(None);
 }
+
+#[test]
+#[allow(clippy::result_large_err)]
+fn review_uploading_a_cold_reference_fetches_its_original_only_once() {
+    use tungstenite::handshake::server::{Request, Response};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let invite = Invite::new(listener.local_addr().unwrap().to_string(), crate::token::file_id().unwrap(), "SyntheticAssetSessionSecret");
+    let server = std::thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut ws = tungstenite::accept_hdr(socket, |_: &Request, mut response: Response| {
+            response.headers_mut().insert("X-FigCraft-Assets", crate::assets_wire::PROTOCOL.parse().unwrap());
+            Ok(response)
+        })
+        .unwrap();
+        let tungstenite::Message::Binary(bytes) = ws.read().unwrap() else { panic!("no hello") };
+        let message::ClientMsg::Hello(hello) = message::decode(&bytes, 1 << 20).unwrap() else { panic!("no hello") };
+        let source = document().unwrap();
+        let payload = source.images["left"].bytes.clone();
+        let asset = source.images["left"].reference();
+        let mut core = figcraft_collab::Server::new(source, "SyntheticAssetSessionSecret", Limits::default());
+        let (_, outs) = core.join_as(hello, message::Access::Edit).unwrap();
+        for out in outs {
+            if let figcraft_collab::Outgoing::To(_, welcome @ ServerMsg::Welcome { .. }) = out {
+                ws.send(tungstenite::Message::Binary(crate::assets_wire::server(&welcome, true).unwrap().into())).unwrap();
+            }
+        }
+        let mut fetches = 0;
+        let mut uploaded = false;
+        loop {
+            let wire = match ws.read() {
+                Ok(wire) => wire,
+                Err(tungstenite::Error::Io(e)) if uploaded && matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+                    break;
+                }
+                Err(e) => panic!("{e}"),
+            };
+            let tungstenite::Message::Binary(bytes) = wire else { continue };
+            match message::decode::<message::ClientMsg>(&bytes, 1 << 20).unwrap() {
+                message::ClientMsg::FetchAsset(_) => {
+                    fetches += 1;
+                    let reply = ServerMsg::Asset { asset: asset.clone(), bytes: Some(figcraft_assets::Blob(payload.clone())), error: None };
+                    ws.send(tungstenite::Message::Binary(message::encode(&reply).unwrap().into())).unwrap();
+                }
+                message::ClientMsg::Changes { changes, .. } => {
+                    assert!(changes.iter().any(|c| matches!(c, figcraft_collab::Change::Image(i) if i.bytes.is_some())));
+                    uploaded = true;
+                    ws.get_mut().set_read_timeout(Some(Duration::from_millis(400))).unwrap();
+                }
+                _ => {}
+            }
+        }
+        assert!(uploaded);
+        fetches
+    });
+    let (guest, _probe, client) = joined(invite).unwrap();
+    let image = &client.document().images["left"];
+    assert!(cache::load(image.asset.as_ref().unwrap()).is_err());
+    guest.send(message::ClientMsg::Changes {
+        base_seq: 0,
+        batch_id: 1,
+        changes: vec![figcraft_collab::Change::Image(figcraft_collab::change::ImageChange::of("left", image))],
+    });
+    assert_eq!(server.join().unwrap(), 1, "queued self-fetch must not download an original twice");
+    drop(guest);
+}

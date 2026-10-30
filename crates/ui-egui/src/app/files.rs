@@ -75,7 +75,7 @@ impl FigApp {
         let exts: &[&str] = if place {
             &["png", "jpg", "jpeg", "webp", "gif", "tif", "tiff"]
         } else {
-            &["penpot", "svg", "png", "jpg", "jpeg", "webp", "gif", "tif", "tiff", "figcraft", "fig", "sketch"]
+            &["penpot", "svg", "png", "jpg", "jpeg", "webp", "gif", "tif", "tiff", "figcraft", "fig", "jam", "sketch"]
         };
         let title = if place { i18n::tr("Place image") } else { i18n::tr("Import") };
         self.pick_file(title, exts, true, |app, file| {
@@ -259,7 +259,7 @@ impl FigApp {
                             let bytes = file.encode();
                             (file, bytes)
                         };
-                        match std::thread::Builder::new().name("figcraft-save".into()).spawn(encode) {
+                        match std::thread::Builder::new().name("figcraft-save".into()).stack_size(figcraft_render::RENDER_STACK).spawn(encode) {
                             Ok(h) => self.ui.auto_saving.push((uid, h)),
                             Err(e) => {
                                 failed.get_or_insert(e.to_string());

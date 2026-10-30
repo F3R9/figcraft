@@ -16,8 +16,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel}
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use figcraft_collab::Replica;
-use figcraft_collab::message::{self, Admin, AdminReply, ClientMsg, HostInfo, Presence, ServerMsg};
+use figcraft_collab::message::{self, ClientMsg, HostInfo, Presence, ServerMsg};
 use figcraft_doc::Document;
 use figcraft_engine::live::{Event, Published, Status};
 use tungstenite::Message;
@@ -30,19 +29,9 @@ pub use crate::join::GuestConfig;
 use crate::join::{Next, Outcome, Resuming, Seen, Taken, after, closed, hello, resolved, take, too_large, unresolved};
 use crate::manage;
 use crate::net::{Duplex, NetLimits, config, shutdown};
+use crate::requests;
+pub use crate::requests::Publish;
 use crate::throttle::{PRESENCE_INTERVAL, Throttle, earliest};
-
-/// What [`Guest::publish`] uploads, and where.
-pub struct Publish {
-    pub server: Endpoint,
-    /// The server's key (`None`: publish as anyone may, on a server open to the public).
-    pub key: Option<String>,
-    /// The file's name on the server.
-    pub name: String,
-    pub doc: Arc<Document>,
-    /// Share the file once it is there: links and join codes for others ([`Event::Shared`]).
-    pub share: bool,
-}
 
 /// A joined (or joining) session. Dropping it leaves.
 pub struct Guest {
@@ -187,8 +176,7 @@ pub(crate) fn upload_file(
     limits: &NetLimits,
     timeout: Duration,
 ) -> Result<(Invite, Published, Option<HostInfo>), String> {
-    let snapshot = Replica::new(doc.clone()).snapshot().map_err(|e| e.to_string())?;
-    let publish = vec![Admin::Publish { name: name.to_string(), snapshot }];
+    let publish = vec![requests::upload(name, doc)?];
     let (replies, hosting) = match key {
         Some(key) => (manage::request(server, key, publish, limits, timeout)?, None),
         None => {
@@ -196,16 +184,7 @@ pub(crate) fn upload_file(
             (replies, Some(info))
         }
     };
-    let (file, edit, view, owner, expires) = match replies.into_iter().next() {
-        Some(AdminReply::Published { file, edit, view }) => (file, edit, view, None, None),
-        Some(AdminReply::Hosted { file, edit, view, owner, expires }) => (file, edit, view, Some(owner), expires),
-        Some(AdminReply::Failed { reason }) => return Err(reason),
-        _ => return Err("the server didn't say where the file is".into()),
-    };
-    let link = |token: String| Invite { server: server.clone(), file: file.id.clone(), token };
-    let (edit, view) = (link(edit.token), link(view.token));
-    let published =
-        Published { server: server.display(), file: file.id.clone(), name: file.name, edit: edit.link(), view: view.link(), owner, expires };
+    let (edit, published) = requests::uploaded(server, replies.into_iter().next())?;
     Ok((edit, published, hosting))
 }
 
@@ -317,6 +296,9 @@ fn session(
             let mut now_send = Vec::new();
             match rx.recv_timeout(wake.saturating_duration_since(Instant::now())) {
                 Ok(Cmd::Fetch(e, asset)) if e == epoch && writer.get_ref().assets => {
+                    if figcraft_assets::cache::load(&asset).is_ok() {
+                        continue;
+                    }
                     if !requests.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&asset) && !asset_queue.contains(&asset) {
                         if asset_queue.len() < 512 {
                             asset_queue.push_back(asset);
@@ -387,6 +369,9 @@ fn session(
             }
             while requests.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len() < 2 && welcomed {
                 let Some(asset) = asset_queue.pop_front() else { break };
+                if figcraft_assets::cache::load(&asset).is_ok() {
+                    continue;
+                }
                 requests.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(asset.clone());
                 if !send(&mut writer, &ClientMsg::FetchAsset(asset), &requests) {
                     break;
@@ -447,7 +432,7 @@ enum SendError {
 }
 
 fn session_scope(cfg: &GuestConfig) -> String {
-    figcraft_assets::AssetRef::of(format!("{}\n{}", cfg.invite.server.url(), cfg.invite.file).as_bytes()).sha256
+    figcraft_assets::file_scope(&cfg.invite.server.url(), &cfg.invite.file)
 }
 
 fn send_result(ws: &mut WebSocket<Duplex>, msg: &ClientMsg, requests: &Requests, scope: Option<&str>) -> Result<(), SendError> {

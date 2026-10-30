@@ -3,7 +3,7 @@
 use std::io::{Read, Write};
 
 use super::*;
-use crate::{add_image, load_bytes, save_bytes};
+use crate::{add_image, load_bytes, read_member, save_bytes};
 use figcraft_doc::color::{ImageScaleMode, Paint};
 use figcraft_doc::{Document, LibraryAsset, NodeKind};
 
@@ -19,7 +19,17 @@ fn png() -> Vec<u8> {
 fn published() -> (Document, figcraft_doc::NodeId, String) {
     let mut d = Document::new("Kit");
     let p = d.first_page().unwrap();
-    let tile = d.create(p, NodeKind::Component { description: String::new(), props: Default::default() }, "Tile", 0.0, 0.0, 10.0, 10.0).unwrap();
+    let tile = d
+        .create(
+            p,
+            NodeKind::Component { description: String::new(), props: Default::default(), prop_order: Vec::new() },
+            "Tile",
+            0.0,
+            0.0,
+            10.0,
+            10.0,
+        )
+        .unwrap();
     let (hash, _, _) = add_image(&mut d, png()).unwrap();
     d.get_mut(tile).unwrap().fills = vec![Paint::image(hash.clone(), ImageScaleMode::Fill)];
     let snap = d.clone();
@@ -158,4 +168,21 @@ fn library_survives_a_save_with_versions() {
     let again = crate::save_bytes_with_versions(&loaded.doc, None, &loaded.versions).unwrap();
     assert_eq!(read_library(std::io::Cursor::new(&again)).unwrap().unwrap().manifest, lib.manifest);
     assert_eq!(crate::load_bytes_with_versions(&again).unwrap().versions.len(), 1);
+}
+
+#[test]
+fn review_ordinary_save_keeps_a_library_from_a_lazy_document_readable() {
+    let (mut doc, _, key) = published();
+    let lib = Arc::make_mut(doc.published.as_mut().unwrap());
+    let image = Arc::make_mut(&mut lib.doc).images.get_mut(&key).unwrap();
+    let mut asset = image.reference();
+    asset.scope = figcraft_assets::file_scope("wss://library.example/", "test");
+    image.asset = Some(asset);
+    let expected = image.bytes.clone();
+    let saved = save_bytes(&doc, None).unwrap();
+    let (back, issues) = load_bytes(&saved).unwrap();
+    assert!(issues.is_empty(), "{issues:?}");
+    assert_eq!(back.published.as_ref().unwrap().doc.images[&key].bytes, expected);
+    assert_eq!(read_library(std::io::Cursor::new(saved)).unwrap().unwrap().doc.images[&key].bytes, expected);
+    assert!(doc.published.unwrap().doc.images[&key].asset.is_some());
 }

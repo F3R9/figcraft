@@ -548,3 +548,25 @@ fn rect_clip_frame_matches_same_rect_fill_on_fractional_edges() {
         }
     }
 }
+
+#[test]
+fn review_required_images_skip_hidden_descendants_but_follow_region_patterns() {
+    use figcraft_color::ImageScaleMode;
+    let mut doc = figcraft_doc::Document::new("Synthetic image preflight");
+    let page = doc.first_page().unwrap();
+    let frame = doc.create(page, NodeKind::Frame, "Export", 0.0, 0.0, 30.0, 30.0).unwrap();
+    let source = doc.create(page, NodeKind::Rectangle, "External source", 100.0, 0.0, 10.0, 10.0).unwrap();
+    doc.get_mut(source).unwrap().fills = vec![Paint::image("unavailable", ImageScaleMode::Fill)];
+    let mut asset = figcraft_assets::AssetRef::of(b"missing synthetic region original");
+    asset.scope = figcraft_assets::file_scope("ws://region.example/", "test");
+    doc.images
+        .insert("unavailable".into(), figcraft_doc::ImageData { asset: Some(asset), bytes: std::sync::Arc::new(Vec::new()), width: 2, height: 2 });
+    let hidden = doc.create(frame, NodeKind::Rectangle, "Hidden", 0.0, 0.0, 10.0, 10.0).unwrap();
+    doc.get_mut(hidden).unwrap().fills = doc.node(source).unwrap().fills.clone();
+    doc.get_mut(hidden).unwrap().visible = false;
+    assert!(crate::images::require_for_nodes(&doc, &[frame]).is_ok());
+    let mut net = VectorNetwork::default();
+    net.regions.push(Region { fills: Some(vec![Paint::pattern(source.0)]), ..Default::default() });
+    let _vector = doc.create(frame, NodeKind::Vector { network: net }, "Region pattern", 0.0, 0.0, 10.0, 10.0).unwrap();
+    assert!(crate::images::require_for_nodes(&doc, &[frame]).err().unwrap().contains("unavailable"));
+}

@@ -96,12 +96,8 @@ fn prepare(changes: &mut [Change], mode: Mode) -> Result<(), String> {
         if !image.asset.valid() {
             return Err("invalid image manifest".into());
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        if matches!(mode, Mode::Lazy)
-            && let Some(bytes) = &image.bytes
-        {
-            cache::store_resident(&image.asset, &bytes.0)?;
-        }
+        // The replica retains current originals and bounded recent history. Lazy encoding
+        // must not depend on disposable disk cache writes (or block every hosted room).
         match mode {
             #[cfg(not(target_arch = "wasm32"))]
             Mode::Lazy => {
@@ -230,10 +226,13 @@ pub(crate) fn validate_upload(msg: &ClientMsg) -> Result<(), String> {
     let mut msg = msg.clone();
     client_changes(&mut msg, &mut |changes| {
         for change in changes {
-            if let Some(image) = image(change)?
-                && image.bytes.is_none()
-            {
-                return Err("image upload is missing its binary payload".into());
+            if let Some(image) = image(change)? {
+                if !image.asset.scope.is_empty() {
+                    return Err("image upload cannot supply a local cache scope".into());
+                }
+                if image.bytes.is_none() {
+                    return Err("image upload is missing its binary payload".into());
+                }
             }
         }
         Ok(())
@@ -245,7 +244,7 @@ mod tests {
     use super::*;
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn only_lazy_encoding_populates_the_source_cache_and_uploads_retain_the_session_scope() {
+    fn encoding_never_populates_the_source_cache_and_uploads_retain_the_session_scope() {
         let bytes = std::sync::Arc::new(format!("synthetic scoped upload {}", crate::token::file_id().unwrap()).into_bytes());
         let asset = AssetRef::of_arc(&bytes);
         let change = Change::Image(ImageChange {
@@ -258,7 +257,8 @@ mod tests {
         assert!(cache::load(&asset).is_err());
         prepare(&mut [change.clone()], Mode::Legacy).unwrap();
         prepare(&mut [change.clone()], Mode::Binary).unwrap();
-        assert!(cache::load(&asset).is_err(), "non-lazy encoders must not read/write the disk cache for resident images");
+        prepare(&mut [change.clone()], Mode::Lazy).unwrap();
+        assert!(cache::load(&asset).is_err(), "no encoder may write the disposable disk cache for resident images");
         let scope = AssetRef::of(b"synthetic outgoing session scope").sha256;
         let msg = ClientMsg::Changes { base_seq: 0, batch_id: 1, changes: vec![change.clone()] };
         remember_uploads(&msg, &scope).unwrap();
@@ -269,6 +269,24 @@ mod tests {
         prepare(&mut [change.clone()], Mode::Lazy).unwrap();
         prepare(&mut [change], Mode::Lazy).unwrap();
         assert_eq!(cache::load(&asset).unwrap(), bytes);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn foreign_upload_scope_is_refused_before_journaling() {
+        let bytes = std::sync::Arc::new(b"synthetic scoped attack".to_vec());
+        let mut asset = AssetRef::of_arc(&bytes);
+        asset.scope = AssetRef::of(b"other file").sha256;
+        let msg = ClientMsg::Changes {
+            base_seq: 0,
+            batch_id: 1,
+            changes: vec![Change::Image(ImageChange { key: "img".into(), width: 1, height: 1, asset, bytes: Some(Blob(bytes)) })],
+        };
+        assert!(validate_upload(&msg).unwrap_err().contains("scope"));
+        // The supported client strips this local capability, so normal edits still pass.
+        let wire = client(&msg, true).unwrap();
+        let normalized = message::decode(&wire, 1 << 20).unwrap();
+        validate_upload(&normalized).unwrap();
     }
 
     #[test]

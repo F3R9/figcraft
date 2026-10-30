@@ -98,10 +98,12 @@ pub fn export_nodes_pdf(doc: &Document, ids: &[NodeId]) -> Result<Vec<u8>, PdfEr
 /// shadows and outside strokes go into the bleed).
 pub fn export_groups(doc: &Document, groups: &[Vec<NodeId>], opts: &PdfOptions) -> Result<Vec<u8>, PdfError> {
     // All pages are checked before bounds, raster fallbacks or PDF writing start.
+    let ids: Vec<_> = groups.iter().flatten().copied().collect();
     for group in groups {
         figcraft_render::check_export_depth(doc, group)?;
-        let _originals = figcraft_render::images::require_for_nodes(doc, group).map_err(PdfError::Asset)?;
     }
+    // One guard for all groups stays alive through bounds and both write attempts.
+    let _originals = figcraft_render::images::require_for_nodes(doc, &ids).map_err(PdfError::Asset)?;
     let mut pages: Vec<(Vec<NodeId>, Rect)> = Vec::new();
     for g in groups.iter().filter(|g| !g.is_empty()) {
         let mut bounds: Option<Rect> = None;
@@ -227,6 +229,8 @@ mod effect_order_tests;
 mod export_tests;
 #[cfg(test)]
 mod group_effects_tests;
+#[cfg(test)]
+mod pattern_depth_tests;
 #[cfg(test)]
 mod print_tests;
 #[cfg(test)]
