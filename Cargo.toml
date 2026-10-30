@@ -34,7 +34,8 @@ figcraft-mcp = { path = "crates/mcp" }
 figcraft-collab-net = { path = "crates/collab-net" }
 figcraft-plugin = { path = "crates/plugin" }
 
-# craft-libs crates all pin one rev (craftrules standards/shared-libraries.md): bump them together.
+# Keep coupled craft-libs crates on one rev. craft-update has no sibling-crate
+# dependencies and is pinned separately for the suite updater rollout.
 # Which paths stored in a document may be followed (craft-libs).
 craft-docpath = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0" }
 # Who draws the window frame on Linux — the compositor or the app — so every Craft app shows the
@@ -42,7 +43,8 @@ craft-docpath = { version = "0.1.0", git = "https://github.com/storytold/craft-l
 # to its own `TitleBar`, so it does not enable craft-window's optional `egui` helpers (which would
 # pull a second egui family version).
 craft-window = { git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0" }
-craft-update = { git = "https://github.com/storytold/craft-libs", version = "=0.1.0", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0", features = ["egui"] }
+# craft-update: app-specific pretend versions apply to startup and manual checks.
+craft-update = { git = "https://github.com/storytold/craft-libs", version = "=0.1.0", rev = "04aa1703b32d299e54f78fcde4182f2b393a9116", features = ["egui"] }
 # The suite's font store: exact lookup of a missing font in the pinned Google Fonts and Noto
 # indexes, and checksum-verified installs into the one folder every Craft app reads (craft-libs).
 craft-font-store = { git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0" }
@@ -52,10 +54,14 @@ craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "92d392cff13
 # The macOS app menu whose Quit (⌘Q) asks the app before quitting, like the window's close button
 # (craft-libs; the menu it replaces quits straight through `terminate:` and loses unsaved work).
 craft-menu = { git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0" }
+# Where the settings live: the suite's folder rules, portable mode included (craft-libs).
+craft-settings = { git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0" }
 
 # foundation
 kurbo = { version = "0.13", features = ["serde"] }
 thiserror = "2"
+# Command-line parsing for figcraft-cli (craft-contrib RFC-0012: clap derive, as photocraft does).
+clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 regex = "1.13"
@@ -79,6 +85,11 @@ skrifa = "0.47"
 harfrust = "0.13"
 unicode-bidi = "0.3"
 unicode-segmentation = "1.13"
+# Line breaks between the words of Thai, Lao, Khmer and Burmese, which are written without spaces
+# (#1219): ICU4X's line segmenter with its compiled data (pure Rust, Unicode-3.0 like the icu_*
+# crates already in the lock, whose version it matches). figcraft-text picks the dictionaries, or
+# in the browser the smaller LSTM models.
+icu_segmenter = { version = "2.3", default-features = false, features = ["compiled_data"] }
 # Code export: layer names transliterated into ASCII identifiers (pure Rust data tables, zero
 # dependencies, BSD-3-Clause, no_std so the web build keeps it too).
 deunicode = "1.6"

@@ -72,7 +72,7 @@ A message the plugin shows (`notify`) appears as a toast; so does a text result.
 
 **Plugin panels.** A plugin written for API 2 can show a panel while it runs: a floating window,
 first placed beside the properties panel (drag its title bar to move it), with the plugin's notes,
-fields (text, number, checkbox, menu, list, colour) and buttons, drawn with FigCraft's own widgets
+fields (text, number, slider, checkbox, menu, list, colour) and buttons, drawn with FigCraft's own widgets
 and named for screen readers. A colour field's swatch opens FigCraft's colour picker (the plugin hears
 of the colour when a drag in the picker ends); its hex can also be typed. Pressing a button or
 changing a field calls the plugin back with every field's value; what that callback does is one
@@ -180,7 +180,7 @@ with the same limits and its manifest's permissions, as any other.
 
 The desktop app keeps such plugins per user, beside its settings (`Plugins/` in FigCraft's settings
 folder: `%APPDATA%\FigCraft` on Windows, `~/Library/Application Support/FigCraft` on macOS,
-`~/.config/FigCraft` elsewhere), each in a folder of its own named by a hash of its id, with its
+`~/.config/FigCraft` elsewhere; `config/` beside the executable in a portable copy), each in a folder of its own named by a hash of its id, with its
 module and its assets. The CLI and the MCP server install for the session only.
 
 **Updating.** When the directory has a newer version than the one installed, the plugin's row
@@ -246,7 +246,7 @@ plugin directory requests (`plugin.directory.*` says so). Import plugins with `p
 | `permissions.access` | `read` (the default): commands that leave the document as it is; such plugins also run from Dev Mode's Inspect tab. `write`: edits too. |
 | `permissions.commands` | Optional allowlist: exact command ids or prefixes ending in `*` (`node.*`). Empty: any command the access allows. |
 | `commands` | The menu commands, each `{id, label, params?}`. Without any, the plugin has one, `run`, unless it's a widget (a widget needs no command). |
-| `params[]` | `{name, label?, type, default?, options?, min?, max?}`; `type` is `text`, `number` (clamped to `min`/`max`), `boolean`, `select` (one of `options`, a menu), `list` (one of `options`, shown as a list) or `color` (hex, `#RRGGBB` or `#RRGGBBAA`). A default that doesn't fit is dropped. |
+| `params[]` | `{name, label?, type, default?, options?, min?, max?}`; `type` is `text`, `number` (clamped to `min`/`max`), `boolean`, `select` (one of `options`, a menu), `list` (one of `options`, shown as a list), `slider` (a number between `min` and `max`, both required, shown as a slider with its value beside it) or `color` (hex, `#RRGGBB` or `#RRGGBBAA`). A default that doesn't fit is dropped. |
 
 ## What a plugin can't do
 
@@ -262,8 +262,8 @@ it can handle):
   back), `codeConnect.import` with a `path` and `variable.import` with a file path instead of JSON,
   `window.*` (new windows open files), `view.theme*`;
 - live sessions and online files: `collab.*`;
-- other documents and the version history: `doc.*` and `version.*` (except `doc.list` and
-  `version.list`);
+- other documents and the version history: `doc.*` and `version.*` (except `doc.list`, which gives a
+  plugin the open files' names but not their paths, and `version.list`);
 - the undo history and nesting: `edit.undo`, `edit.redo`, `edit.repeat`, `command.batch` (a run is
   already one undo step), `plugin.*` / `plugins.*` (no plugin runs another) and `widget.*`;
 - writing layer data whose key starts with `figcraft.widget` (a widget's own data: no plugin can
@@ -371,7 +371,7 @@ plugin is removed.
 ```
 
 `title` defaults to the plugin's name. Controls are the manifest's parameter types (`text`,
-`number`, `boolean`, `select`, `list`, `color`) plus `button` and `note` (text in `label`, up to
+`number`, `boolean`, `select`, `list`, `slider`, `color`) plus `button` and `note` (text in `label`, up to
 1,000 characters, no `name` needed), in order, each `name` unique. A field shows its `value`; a
 field without one keeps what the user entered before the panel was updated, so a plugin can update
 a note without resetting the other fields. Buttons next to each other share a row; the first button
@@ -517,7 +517,7 @@ import what you need from `figcraft`.
 - Widgets: clicks, field edits and menu items are their only events (no hover or timers), a field
   is plain text (no placeholder, length or single-line setting), they can't open a panel, and their layers are frames, text, rectangles, ellipses and images only (no
   vectors, components or variables).
-- Panels: no images, sliders or free layout inside a panel.
+- Panels: no images or free layout inside a panel.
 - Data in the document: plugins keep data on layers (pages included) with `node.set {props:
   {pluginData: {key: value}}}` (a `null` value removes a key) and read it back with `node.get`, which
   reports `pluginData: {key: value}` (values as strings) when a layer has any; there is no separate

@@ -71,14 +71,15 @@ const BURST: usize = 256;
 enum Kind {
     /// In `file`'s session as client `id`, through link `link`.
     Joined { file: String, id: u32, link: Option<String> },
-    /// Managing the server's files.
-    Managing,
+    /// Managing the server's files; `comments`: its client reads comment links.
+    Managing { comments: bool },
     /// Using `file`'s team library through link `link` of `access` (revoking it disconnects).
     Library { file: String, access: Access, link: Option<String> },
     /// Using the plugin directory; `publisher`: with the server's key.
     Plugins { publisher: bool },
-    /// Publishing without the key, or managing the file `owns` with its owner token.
-    Hosting { owns: Option<String> },
+    /// Publishing without the key, or managing the file `owns` with its owner token; `comments`:
+    /// its client reads comment links.
+    Hosting { owns: Option<String>, comments: bool },
 }
 
 /// A connection whose first message the hub is looking at.
@@ -116,7 +117,17 @@ struct Room {
 
 impl Room {
     fn new(server: Server) -> Self {
-        let assets = server.replica().document().images.values().map(|image| image.reference()).collect();
+        let assets = server
+            .replica()
+            .document()
+            .images
+            .values()
+            .map(|image| {
+                let mut asset = image.reference();
+                asset.scope.clear();
+                asset
+            })
+            .collect();
         Self { assets, server, ids: BTreeMap::new(), throttles: BTreeMap::new(), latest: BTreeMap::new(), guests: 0, local: None }
     }
 
@@ -236,7 +247,7 @@ impl<B: Backend> Hub<B> {
                 let Some(c) = self.conns.get(&conn) else { return };
                 let ip = c.ip;
                 // The operator (with the server key) isn't held to the limits on addresses.
-                if !matches!(c.kind, Kind::Managing) && !self.backend.message(ip, &msg) {
+                if !matches!(c.kind, Kind::Managing { .. }) && !self.backend.message(ip, &msg) {
                     log::info!("event=refused ip={ip} reason=messages_per_address");
                     return self.kick(&[conn], "too many messages from your address: wait a minute and try again");
                 }
@@ -302,7 +313,7 @@ impl<B: Backend> Hub<B> {
                 let (file, id) = (file.clone(), *id);
                 self.client_message(&file, id, msg, Some(bytes));
             }
-            Some(Kind::Hosting { owns }) => match msg {
+            Some(Kind::Hosting { owns, .. }) => match msg {
                 ClientMsg::Admin(Admin::RemovePeer { file, client }) => {
                     let reply = if owns.as_deref() == Some(file.as_str()) {
                         self.removed_reply(&file, client)
@@ -321,12 +332,12 @@ impl<B: Backend> Hub<B> {
                 ClientMsg::Ping => self.answer(conn, &ServerMsg::Pong),
                 _ => self.kick(&[conn], "only publishing and managing your own files are spoken on this connection"),
             },
-            Some(Kind::Managing) => match msg {
+            Some(Kind::Managing { .. }) => match msg {
                 ClientMsg::Admin(Admin::RemovePeer { file, client }) => {
                     let reply = self.removed_reply(&file, client);
                     self.answer(conn, &ServerMsg::Admin(Box::new(reply)));
                 }
-                ClientMsg::Admin(req) => self.admin(conn, req),
+                ClientMsg::Admin(req) => self.admin(conn, ip, req),
                 ClientMsg::Ping => self.answer(conn, &ServerMsg::Pong),
                 _ => self.kick(&[conn], "only requests to manage files are spoken on this connection"),
             },
@@ -510,7 +521,8 @@ impl<B: Backend> Hub<B> {
             return refuse(&c.out, &why);
         }
         log::info!("live session: connection {conn} manages files");
-        self.take_in(conn, c, Kind::Managing, &ServerMsg::Admin(Box::new(AdminReply::Ready)));
+        let comments = message::reads_comments(&m.client_version);
+        self.take_in(conn, c, Kind::Managing { comments }, &ServerMsg::Admin(Box::new(AdminReply::Ready)));
     }
 
     fn open_library(&mut self, conn: u64, o: OpenLibrary, c: Pending) {
@@ -518,7 +530,7 @@ impl<B: Backend> Hub<B> {
             return refuse(&c.out, &unsupported(o.protocol));
         }
         let (access, link) = match self.backend.admit(&o.file, &o.token) {
-            Ok(a) => (a.access, a.link),
+            Ok(a) => (a.access.for_reader(message::reads_comments(&o.client_version)), a.link),
             Err(why) => return refuse(&c.out, &why),
         };
         self.take_in(conn, c, Kind::Library { file: o.file, access, link }, &ServerMsg::Library(Box::new(LibraryReply::Ready { access })));
@@ -550,7 +562,8 @@ impl<B: Backend> Hub<B> {
             }
         };
         let owns = (!o.owner.is_empty()).then(|| o.file.clone());
-        self.take_in(conn, c, Kind::Hosting { owns }, &ServerMsg::Hosting(Box::new(info)));
+        let comments = message::reads_comments(&o.client_version);
+        self.take_in(conn, c, Kind::Hosting { owns, comments }, &ServerMsg::Hosting(Box::new(info)));
     }
 
     /// A join code: the file it opens and the token to join it with, then the connection closes
@@ -573,16 +586,19 @@ impl<B: Backend> Hub<B> {
         }
     }
 
-    fn admin(&mut self, conn: u64, req: Admin) {
+    fn admin(&mut self, conn: u64, ip: IpAddr, req: Admin) {
         let rooms = &self.rooms;
         let open = |file: &str| rooms.get(file).map(Room::info);
-        let handled = self.backend.admin(req, &open);
+        let handled = self.backend.admin(ip, req, &open);
         self.handled(conn, handled);
     }
 
-    /// Answer a managing or hosting request, and disconnect whoever it affects.
+    /// Answer a managing or hosting request (as its client reads it), and disconnect whoever it
+    /// affects.
     fn handled(&mut self, conn: u64, handled: Handled) {
-        self.answer(conn, &ServerMsg::Admin(Box::new(handled.reply)));
+        let comments =
+            self.conns.get(&conn).is_some_and(|c| matches!(c.kind, Kind::Managing { comments: true } | Kind::Hosting { comments: true, .. }));
+        self.answer(conn, &ServerMsg::Admin(Box::new(handled.reply.for_reader(comments))));
         if let Some((file, link)) = handled.revoked {
             let with = |joined: bool| -> Vec<u64> {
                 let uses = |c: &Conn| match &c.kind {
@@ -735,11 +751,28 @@ impl<B: Backend> Hub<B> {
                     Outgoing::All(m) => (room.server.peers().map(|p| p.client_id).collect(), m),
                     Outgoing::Others(x, m) => (room.server.peers().map(|p| p.client_id).filter(|id| *id != x).collect(), m),
                 };
-                let added: Vec<_> =
-                    crate::assets_wire::manifests(&msg).unwrap_or_default().into_iter().filter(|asset| !room.assets.contains(asset)).collect();
+                let added: Vec<_> = crate::assets_wire::manifests(&msg)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|mut asset| {
+                        asset.scope.clear();
+                        asset
+                    })
+                    .filter(|asset| !room.assets.contains(asset))
+                    .collect();
                 if !added.is_empty() {
-                    let mut catalog: std::collections::BTreeSet<_> =
-                        room.server.replica().document().images.values().map(|image| image.reference()).collect();
+                    let mut catalog: std::collections::BTreeSet<_> = room
+                        .server
+                        .replica()
+                        .document()
+                        .images
+                        .values()
+                        .map(|image| {
+                            let mut asset = image.reference();
+                            asset.scope.clear();
+                            asset
+                        })
+                        .collect();
                     catalog.extend(added);
                     for asset in &room.assets {
                         if catalog.len() >= 40_000 {

@@ -29,10 +29,10 @@ pub use export::{
     frames_pdf, jobs_for, penpot_bytes, safe_file_name,
 };
 use export::{export, export_frames_pdf, export_layers, pdf_bytes};
-use load::{OWNED_RECOVERY, font_report, recovered_mode};
+pub use load::{MAX_DOCUMENT_FILE, load, load_bytes, load_path, recover_app_owned};
+use load::{OWNED_RECOVERY, font_report, recovered_from_mode, recovered_mode};
 #[cfg(test)]
 pub(crate) use load::{installed_family, sketch_line};
-pub use load::{load, load_bytes, load_path, recover_app_owned};
 pub(crate) use load::{load_fig, read_capped, recovered, variables_param, write};
 pub use open::MAX_RECENT;
 #[cfg(test)]
@@ -181,15 +181,21 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "file.recover",
             "Recover file",
-            "{path, allowRemoteReferences?: false}  open a recovery copy as an unsaved document with no path → {index}; external cache references are refused by default. true is reserved for the trusted desktop recovery API and is refused for ordinary command/CLI/MCP/plugin callers",
+            "{path | data (base64), allowRemoteReferences?: false}  open a recovery copy (written while the app runs, read back after a crash) as a document with unsaved changes and no path: saving asks where → {index}",
             false,
             |s, p| {
-                let path = req_string("file.recover", p, "path")?;
                 let references = p.get("allowRemoteReferences").and_then(Value::as_bool).unwrap_or(false);
                 if references && !OWNED_RECOVERY.get() {
                     return Err(EngineError::Disabled("file.recover".into(), "external cache references are reserved for app-owned recovery".into()));
                 }
-                s.docs.push(recovered_mode(&path, references)?);
+                let ds = match string(p, "data") {
+                    Some(d) => recovered_from_mode(
+                        &base64::engine::general_purpose::STANDARD.decode(d.trim()).map_err(|e| bad("file.recover", format!("`data`: {e}")))?,
+                        references,
+                    )?,
+                    None => recovered_mode(&req_string("file.recover", p, "path")?, references)?,
+                };
+                s.docs.push(ds);
                 s.active = s.docs.len() - 1;
                 Ok(json!({"index": s.active}))
             }
@@ -202,7 +208,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "file.colorProfile",
             "Color profile",
-            "{profile?: srgb|displayP3, convert? (default true: convert colour values so colours keep their appearance; false: keep the values and reinterpret them)}  without `profile`, returns the current one (and the app opens the dialog). Returns {profile, changed}",
+            "{profile?: srgb|displayP3, convert? (default true: convert colour values so colours keep their appearance — a colour calculation's mix keeps its ends exact and its colours in between move slightly; false: keep the values and reinterpret them)}  without `profile`, returns the current one (and the app opens the dialog). Returns {profile, changed}",
             true,
             color_profile
         ),
@@ -325,16 +331,24 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "doc.list",
             "List documents",
-            "{}  → [{index, id, name, path, dirty, active}]: `id` names the file in a control or MCP call's `document`",
+            "{}  → [{index, id, name, path?, dirty, active}]: `id` names the file in a control or MCP call's `document`; `path` only for the user's own scripts, not AI agents or plugins",
             false,
             |s, _| {
+                // Where the files are on disk is the user's: an agent gets their names (#1117).
+                let paths = s.agent.is_none();
                 Ok(Value::Array(
-                s.docs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, d)| json!({"index": i, "id": d.uid, "name": d.doc.name, "path": d.path, "dirty": d.is_dirty(), "active": i == s.active}))
-                    .collect(),
-            ))
+                    s.docs
+                        .iter()
+                        .enumerate()
+                        .map(|(i, d)| {
+                            let mut e = json!({"index": i, "id": d.uid, "name": d.doc.name, "dirty": d.is_dirty(), "active": i == s.active});
+                            if paths {
+                                e["path"] = json!(d.path);
+                            }
+                            e
+                        })
+                        .collect(),
+                ))
             }
         ),
         spec!("doc.home", "Home", "{}", false, |s, _| {

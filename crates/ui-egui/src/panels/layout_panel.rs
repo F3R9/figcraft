@@ -4,6 +4,8 @@
 //! alignment in its cell, and clip content. Everything goes through `node.set` props or `layout.*`
 //! commands.
 
+use std::sync::Arc;
+
 use egui::{Align2, CornerRadius, Id, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use figcraft_doc::{AutoLayout, CellAlign, ContentAlign, CrossAlign, Document, LayoutMode, MainAlign, Node, NodeId, NodeKind, Sizing};
 use serde_json::json;
@@ -23,19 +25,23 @@ fn parent_of(doc: &Document, id: NodeId) -> Option<&Node> {
     doc.node(id).and_then(|n| n.parent).and_then(|p| doc.node(p))
 }
 
-pub fn layout_section(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId]) {
+/// Show selection sizing and layout controls; offer Add only when every selected container has
+/// no auto layout and the selection is editable outside an instance.
+pub fn layout_section(app: &mut FigApp, ui: &mut Ui, doc: &Arc<Document>, sel: &[NodeId]) {
     let ids = sel.to_vec();
     let frames = sel.iter().all(|i| doc.node(*i).is_some_and(|n| n.kind.is_frame_like()));
+    let layout_containers = sel.iter().all(|i| doc.node(*i).is_some_and(|n| n.kind.is_frame_like() || matches!(n.kind, NodeKind::Group)));
+    let no_al = !sel.is_empty() && sel.iter().all(|i| doc.node(*i).is_some_and(|n| n.layout.is_none()));
     let al = common(doc, sel, |n| n.layout.clone());
     let has_al = matches!(al, Some(Some(_)));
     let title = if has_al { tr("Auto layout") } else { tr("Layout") };
     // An instance's auto layout is its main's (only padding, gap and alignment are its own); the
     // layers inside it override their size and resizing, not their place in the layout.
-    let in_instance = sel.iter().any(|i| figcraft_engine::components::owning_instance(doc, *i).is_some());
-    let nested = sel.iter().any(|i| figcraft_engine::components::inside_instance(doc, *i));
+    let facts = crate::right::in_instance(ui.ctx(), doc, sel);
+    let (in_instance, nested) = (facts.any, facts.nested);
     let btns: Vec<(Icon, &str)> = if in_instance {
         vec![]
-    } else if frames && !has_al {
+    } else if layout_containers && no_al {
         vec![(Icon::Plus, crate::shortcuts::tip(tr("Add auto layout"), "layout.add"))]
     } else if has_al {
         vec![(Icon::Minus, crate::shortcuts::tip(tr("Remove auto layout"), "layout.remove"))]

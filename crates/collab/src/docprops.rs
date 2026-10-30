@@ -213,6 +213,9 @@ pub(crate) fn image_within(key: &str, value: &Json, max_bytes: u64) -> Result<Im
     if value.0.get("asset").is_some() {
         let mut image: crate::change::ImageChange = value.read("image manifest")?;
         image.key = key.into();
+        if image.asset.len > max_bytes {
+            return Err(Error::Invalid(format!("image: {} bytes pass the {max_bytes} an image may be", image.asset.len)));
+        }
         return image.data();
     }
     if !ImageData::is_valid_key(key) {

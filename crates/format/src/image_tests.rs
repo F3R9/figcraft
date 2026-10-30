@@ -160,3 +160,44 @@ fn a_hash_shaped_rest_image_ref_never_names_its_placeholder() {
         assert_eq!(doc.images.keys().collect::<Vec<_>>(), ["rest-image-missing"], "{image_ref}");
     }
 }
+
+#[test]
+fn review_ordinary_save_strips_scopes_from_main_versions_and_branches() {
+    let mut doc = Document::new("Synthetic portable history");
+    let (key, _, _) = add_image(&mut doc, png()).unwrap();
+    let image = doc.images.get_mut(&key).unwrap();
+    let mut asset = image.reference();
+    asset.scope = figcraft_assets::file_scope("wss://history.example/", "file");
+    image.asset = Some(asset.clone());
+    let version = Version::new("snapshot", "V", "", 0, Arc::new(doc.clone()));
+    let branch = Branch {
+        id: "branch".into(),
+        name: "B".into(),
+        time: 0,
+        client: 1,
+        state: BranchState::Active,
+        base: Arc::new(doc.clone()),
+        head: Arc::new(doc.clone()),
+        versions: vec![version.clone()],
+    };
+    let recovery = save_recovery_bytes_with_history(&doc, &[version], &[branch]).unwrap();
+    let loaded = load_recovery_bytes_with_versions(&recovery).unwrap();
+    let saved = save_bytes_with_history(&loaded.doc, None, &loaded.versions, &loaded.branches).unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&saved)).unwrap();
+    for i in 0..zip.len() {
+        use std::io::Read;
+        let mut member = zip.by_index(i).unwrap();
+        if member.name().ends_with(".json") {
+            let mut text = String::new();
+            member.read_to_string(&mut text).unwrap();
+            assert!(!text.contains("remoteImageIndex"), "{}", member.name());
+            assert!(!text.contains(&asset.scope), "{}", member.name());
+        }
+    }
+    let portable = load_bytes_with_versions(&saved).unwrap();
+    assert!(portable.issues.is_empty(), "{:?}", portable.issues);
+    assert_eq!(portable.doc.images[&key].bytes, doc.images[&key].bytes);
+    assert!(portable.versions[0].document().unwrap().images[&key].asset.is_none());
+    assert!(portable.branches[0].head.images[&key].asset.is_none());
+    assert!(doc.images[&key].asset.is_some(), "saving must not mutate the source");
+}

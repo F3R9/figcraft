@@ -48,18 +48,27 @@ pub fn require_for_nodes(doc: &Document, ids: &[NodeId]) -> Result<figcraft_asse
             continue;
         }
         let Some(node) = doc.node(id) else { continue };
-        figcraft_doc::node_images(node, &mut images);
+        if !node.visible {
+            continue;
+        }
         stack.extend(node.children.iter().copied());
         let mut paints: Vec<_> = node.fills.iter().chain(&node.strokes).collect();
+        if let figcraft_doc::NodeKind::Vector { network } = &node.kind {
+            paints.extend(network.regions.iter().flat_map(|region| region.fills.iter().flatten()));
+        }
         if let figcraft_doc::NodeKind::Text(text) = &node.kind {
             paints.extend(text.style.fills.iter().flatten());
             for run in &text.runs {
                 paints.extend(run.style.fills.iter().flatten());
             }
         }
-        for paint in paints {
-            if let PaintKind::Pattern(pattern) = &paint.kind {
-                stack.push(NodeId(pattern.source));
+        for paint in paints.into_iter().filter(|paint| paint.visible) {
+            match &paint.kind {
+                PaintKind::Pattern(pattern) => stack.push(NodeId(pattern.source)),
+                PaintKind::Image(image) => {
+                    images.insert(image.image.clone());
+                }
+                _ => {}
             }
         }
     }
@@ -123,6 +132,13 @@ impl PixmapCache {
         self.bytes = self.bytes.saturating_add(size);
     }
 
+    fn clear_downloaded(&mut self) {
+        let keys: Vec<_> = self.map.keys().filter(|key| key.0.starts_with("remote:")).cloned().collect();
+        for key in keys {
+            self.remove(&key);
+        }
+    }
+
     fn remove(&mut self, key: &Key) {
         if let Some((p, _)) = self.map.remove(key) {
             self.bytes = self.bytes.saturating_sub(p.data().len() as u64);
@@ -134,6 +150,14 @@ impl PixmapCache {
     pub(crate) fn bytes(&self) -> u64 {
         self.bytes
     }
+}
+
+/// Drop decoded downloaded pixels and animation frames without discarding local images.
+/// In-flight authorized downloads may populate them again after clearing.
+pub fn clear_downloaded() {
+    cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear_downloaded();
+    padded_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear_downloaded();
+    anim_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|key, _| !key.0.starts_with("remote:"));
 }
 
 /// The sides image `hash` is decoded at in the cache (any filters and profile), smallest first.
@@ -508,4 +532,24 @@ pub fn padded(hash: &str, filters: &ImageFilters, profile: ColorProfile, pm: &Pi
     let out = Arc::new(pad(pm)?);
     padded_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, out.clone(), MAX_CACHED_BYTES);
     Some(out)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod downloaded_cache_tests {
+    use super::*;
+    #[test]
+    fn review_clearing_downloaded_pixels_keeps_local_images_and_byte_accounting() {
+        let mut cache = PixmapCache::default();
+        let remote = ("remote:test:clear".into(), [0; 7], ColorProfile::default(), 1);
+        let local = ("resident:test:clear".into(), [0; 7], ColorProfile::default(), 1);
+        let pix = Arc::new(Pixmap::new(1, 1).unwrap());
+        cache.insert(remote.clone(), pix.clone(), 100);
+        cache.insert(local.clone(), pix, 100);
+        assert_eq!(cache.bytes(), 8);
+        cache.clear_downloaded();
+        assert_eq!(cache.bytes(), 4);
+        assert!(cache.get(&remote).is_none());
+        assert!(cache.get(&local).is_some());
+    }
 }

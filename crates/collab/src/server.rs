@@ -7,7 +7,9 @@ use figcraft_doc::{Document, NodeId};
 use serde::{Deserialize, Serialize};
 
 use crate::change::{Change, Entry, Prop, Target};
-use crate::message::{Accepted, Access, CatchUp, ClientMsg, Hello, PROTOCOL, Peer, Presence, Processed, Resume, ServerMsg, Signal, reads_signals};
+use crate::message::{
+    Accepted, Access, CatchUp, ClientMsg, Hello, PROTOCOL, Peer, Presence, Processed, Resume, ServerMsg, Signal, reads_comments, reads_signals,
+};
 use crate::replica::{Mode, Replica, create_change};
 use crate::{Error, Limits, docprops, same_secret};
 
@@ -24,6 +26,9 @@ pub enum Outgoing {
 
 /// Why a viewer's batch is refused.
 pub const VIEW_ONLY: &str = "you can only view this file (your link is view-only)";
+
+/// Why a commenter's batch that changes more than comment threads is refused.
+pub const COMMENT_ONLY: &str = "you can only view and comment on this file (your link is a comment link)";
 
 /// A new style, variable, collection or comment may not take an id in a space at or above this
 /// that isn't its creator's. Client ids start above every space in the document after a restart,
@@ -59,7 +64,7 @@ pub struct Server {
     presence: BTreeMap<u32, Presence>,
     acked: BTreeMap<u32, u64>,
     /// Deleted node ids: only these may be created again (by undo); new ids must come from the
-    /// creating client's id space.
+    /// creating client's id space. At most [`MAX_DELETED`].
     deleted: BTreeSet<NodeId>,
     /// Removed document-level entries (styles, variables, collections, comments): these may be
     /// put back by anyone (undo); a new one must not have an id from another client's space.
@@ -75,8 +80,8 @@ pub struct Server {
     /// Changes in `log`, and about how many bytes it holds ([`weight`]).
     log_changes: usize,
     log_bytes: usize,
-    /// The connected clients that may only view.
-    viewers: BTreeSet<u32>,
+    /// The connected clients that may not edit, and what they may do instead (view, or comment).
+    limited: BTreeMap<u32, Access>,
     /// What changed the lasting state since it was last taken (`None`: not kept).
     journal: Option<Vec<Journal>>,
     /// The connected clients that read signals (cursor chat, spotlight).
@@ -92,6 +97,11 @@ pub struct Server {
 /// The most client ids a session remembers for reconnecting (the oldest disconnected ones go
 /// first; a forgotten client joins as new).
 const MAX_REMEMBERED: usize = 65_536;
+
+/// The most deleted node ids a session remembers for undo. Past it the lowest ids go first (the
+/// earliest clients' first layers): undoing the delete of one of those is then refused, unless the
+/// layer is in the undoing client's own id space, which it may always create.
+pub(crate) const MAX_DELETED: usize = 1 << 18;
 
 /// What a session server needs to carry on after a restart: the document, the sequence number,
 /// the client-id counter (so ids are never handed out twice), the clients that can reconnect,
@@ -133,7 +143,7 @@ impl Server {
             log: VecDeque::new(),
             log_changes: 0,
             log_bytes: 0,
-            viewers: BTreeSet::new(),
+            limited: BTreeMap::new(),
             journal: None,
             signals: BTreeSet::new(),
             spotlight: None,
@@ -173,6 +183,7 @@ impl Server {
         server.next_client = server.next_client.max(saved);
         server.issued = state.issued.into_iter().filter(|(id, _)| *id < server.next_client).collect();
         server.deleted = state.deleted;
+        server.forget_deleted();
         server.removed = state.removed;
         let contiguous = state.log.windows(2).all(|w| matches!(w, [a, b] if a.seq + 1 == b.seq));
         // History saved before the image checks may hold image entries they refuse. The snapshot
@@ -246,6 +257,13 @@ impl Server {
         }
     }
 
+    /// Beyond [`MAX_DELETED`] deleted ids, forget the lowest.
+    fn forget_deleted(&mut self) {
+        while self.deleted.len() > MAX_DELETED {
+            self.deleted.pop_first();
+        }
+    }
+
     /// Beyond [`MAX_REMEMBERED`] client ids, forget the oldest one that isn't connected.
     fn forget_oldest(&mut self) {
         if self.issued.len() > MAX_REMEMBERED
@@ -291,8 +309,11 @@ impl Server {
         self.join_as(hello, Access::Edit)
     }
 
-    /// [`join`](Self::join) with what the client may do: every batch of a viewer is refused.
+    /// [`join`](Self::join) with what the client may do: every batch of a viewer is refused, and
+    /// every batch of a commenter that changes more than comment threads. A client that can't
+    /// read comment links joins with one as a viewer.
     pub fn join_as(&mut self, hello: Hello, access: Access) -> Result<(u32, Vec<Outgoing>), ServerMsg> {
+        let access = access.for_reader(reads_comments(&hello.client_version));
         let refuse = |reason: &str| ServerMsg::Refused { reason: reason.to_string() };
         if hello.protocol != PROTOCOL {
             return Err(refuse(&format!("protocol {} isn't supported (this server speaks {PROTOCOL})", hello.protocol)));
@@ -338,10 +359,10 @@ impl Server {
         let others = self.peers.values().filter(|p| p.client_id != id).cloned().collect();
         let welcome = ServerMsg::Welcome { session: self.session, client_id: id, seq: self.seq, catch_up, processed, peers: others, access, secret };
         self.peers.insert(id, peer.clone());
-        if access == Access::View {
-            self.viewers.insert(id);
+        if access == Access::Edit {
+            self.limited.remove(&id);
         } else {
-            self.viewers.remove(&id);
+            self.limited.insert(id, access);
         }
         let mut outs = vec![Outgoing::To(id, welcome), Outgoing::Others(id, ServerMsg::PeerJoined(peer))];
         if signals {
@@ -370,7 +391,7 @@ impl Server {
     pub fn leave(&mut self, id: u32) -> Vec<Outgoing> {
         self.presence.remove(&id);
         self.acked.remove(&id);
-        self.viewers.remove(&id);
+        self.limited.remove(&id);
         self.signals.remove(&id);
         if self.spotlight == Some(id) {
             self.spotlight = None;
@@ -392,7 +413,11 @@ impl Server {
             // client learned what happened to it from the catch-up.
             ClientMsg::Changes { batch_id, .. } if self.issued.get(&from).is_some_and(|p| batch_id <= p.last_batch) => Vec::new(),
             ClientMsg::Changes { base_seq, batch_id, changes } => {
-                let result = if self.viewers.contains(&from) { Err(Error::Invalid(VIEW_ONLY.into())) } else { self.accept(from, base_seq, &changes) };
+                let result = match self.limited.get(&from) {
+                    Some(Access::View) => Err(Error::Invalid(VIEW_ONLY.into())),
+                    Some(Access::Comment) if !changes.iter().all(Change::is_comment) => Err(Error::Invalid(COMMENT_ONLY.into())),
+                    _ => self.accept(from, base_seq, &changes),
+                };
                 if let Some(p) = self.issued.get_mut(&from) {
                     p.note(batch_id, result.is_err());
                 }
@@ -418,6 +443,9 @@ impl Server {
             // current spotlight.
             ClientMsg::Signal(sig) => {
                 let Some(sig) = sig.clean().filter(|s| s.kind != Signal::READY) else { return Vec::new() };
+                if sig.kind == Signal::NAME {
+                    return self.rename(from, sig.text);
+                }
                 if sig.kind == Signal::SPOTLIGHT {
                     if sig.on() {
                         self.spotlight = Some(from);
@@ -446,6 +474,15 @@ impl Server {
                 vec![Outgoing::To(from, ServerMsg::Refused { reason: "managing files and libraries needs a connection of its own".into() })]
             }
         }
+    }
+
+    /// Client `from` is called `name` from now on (cleaned): everyone, itself too, hears it as its
+    /// `PeerJoined`, and newcomers' welcomes list it so.
+    fn rename(&mut self, from: u32, name: String) -> Vec<Outgoing> {
+        let max = self.limits.max_name;
+        let Some(peer) = self.peers.get_mut(&from).filter(|p| p.name != name && name.chars().count() <= max) else { return Vec::new() };
+        peer.name = name;
+        vec![Outgoing::All(ServerMsg::PeerJoined(peer.clone()))]
     }
 
     /// Keep an accepted batch in the log (dropping the oldest beyond the limits).
@@ -499,6 +536,7 @@ impl Server {
             }
         }
         self.deleted.extend(applied.deleted);
+        self.forget_deleted();
         for (entry, now) in entries {
             if now {
                 self.removed.remove(&entry);

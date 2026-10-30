@@ -31,6 +31,7 @@ use render::{JobKey, request_render, shows};
 pub use rulers::fmt;
 pub(crate) use rulers::{status_badge, status_label};
 pub mod board_bar;
+pub mod board_connect;
 pub mod board_facilitate;
 pub mod comments;
 pub mod cursors;
@@ -74,6 +75,9 @@ pub struct CanvasState {
     pub last_pointer: Option<Point>,
     /// The real pointer was over the canvas last frame (leaving it clears what it hovered).
     hovering: bool,
+    /// The hover last sent to the tools and the state it was found in ([`input::HoverKey`]): the
+    /// frames egui draws after a pointer move carry no new input, and would find the same again.
+    last_hover: Option<input::HoverKey>,
     /// What the pointer shows over the canvas (`ui.inspect`); none while it is elsewhere or
     /// something on the canvas with a cursor of its own has it (a ruler guide, a gradient handle).
     pub cursor: Option<crate::cursors::Shown>,
@@ -81,6 +85,8 @@ pub struct CanvasState {
     /// The pen pressure last reported during the current press (pen and stylus touches; the
     /// winit backends and browsers that report it).
     pressure: Option<f32>,
+    /// The latest scroll came from a mouse wheel rather than a trackpad (Scroll wheel zoom).
+    wheel_is_mouse: bool,
 }
 
 impl Default for CanvasState {
@@ -105,8 +111,10 @@ impl Default for CanvasState {
             zoom_drag: None,
             last_pointer: None,
             hovering: false,
+            last_hover: None,
             preedit: None,
             pressure: None,
+            wheel_is_mouse: false,
         }
     }
 }
@@ -292,12 +300,14 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
     crate::board_facilitate::badges(app, &painter);
     crate::board_bar::stamp_author(app, &painter, ctx.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p)));
     crate::board_bar::show(app, &ctx);
+    crate::board_connect::show(app, &ctx);
     crate::board_facilitate::show(app, &ctx, rect);
     crate::widget_bar::show(app, &ctx);
     crate::selection_spacing::draw(app, &painter);
     crate::comments::draw(app, &painter);
     crate::live_text::draw(app, &painter);
     crate::live::draw(app, &painter, &ctx);
+    crate::live::agent::draw(app, &painter, &ctx);
     crate::live::chat_box(app, &ctx);
     crate::live::spotlight_banner(app, &ctx, rect);
     crate::comments::popovers(app, &ctx);
@@ -362,6 +372,15 @@ fn describe_box([x0, y0, x1, y1]: [f64; 4]) -> String {
 
 #[cfg(test)]
 mod builder_poly_tests;
+
+#[cfg(test)]
+mod outline_tests;
+
+#[cfg(test)]
+mod selection_cache_tests;
+
+#[cfg(test)]
+mod wheel_zoom_tests;
 
 #[cfg(test)]
 mod zoom_preview_tests;

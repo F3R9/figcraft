@@ -192,6 +192,7 @@ impl FigApp {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.ui.frame_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            self.frame_stats.timed(self.ui.frame_ms);
         }
     }
 
@@ -305,6 +306,7 @@ impl FigApp {
                     layers::left_panel(self, ui)
                 });
         }
+        self.ui.right_panel_rect = None;
         if right_open {
             if !narrow {
                 edges.push(("right", ui.available_rect_before_wrap().max.x - right_w, right_w, -1.0));

@@ -71,9 +71,9 @@ pub(crate) use host::{clean_shared, share_answer};
 pub(crate) use join::start_join;
 pub use join::{can_remove_people, specs};
 pub use types::{
-    Bind, DEFAULT_SERVER, Event, HostOptions, LiveLink, MAX_NAME, MAX_SELECTION, NO_HOSTING, NO_SESSION, NetReply, NetRequest, ONLINE_OFF, PEOPLE,
-    PageInfo, PublishOptions, Published, Role, SessionId, SessionInfo, Share, Shared, SharedLink, Status, TOO_LARGE_TO_JOIN, Via, join_target,
-    parse_color,
+    Bind, DEFAULT_SERVER, Event, HostOptions, LiveLink, MAX_NAME, MAX_PEERS, MAX_SELECTION, NO_HOSTING, NO_SESSION, NetReply, NetRequest, ONLINE_OFF,
+    PEOPLE, PageInfo, PublishOptions, Published, Role, SessionId, SessionInfo, Share, Shared, SharedLink, Status, TOO_LARGE_TO_JOIN, Via,
+    join_target, parse_color,
 };
 
 /// The view a follow last applied: any other view means the user moved.
@@ -196,8 +196,8 @@ pub struct Lives {
     /// Registers the app as the opener of `figcraft://` invite links (the desktop app on Windows
     /// installs one; see [`crate::invite_links`]).
     pub links: Option<Box<dyn crate::invite_links::LinkRegistrar>>,
-    /// The recorded online files changed since the app last saved the preferences (it saves them
-    /// at once: a crash must not lose an owner token).
+    /// The recorded online files or your team libraries changed since the app last saved the
+    /// preferences (it saves them at once: a crash must not lose an owner token).
     pub unsaved: bool,
     /// Servers that couldn't say what became of your files at the last `collab.files {refresh}`.
     pub servers: crate::online::Problems,
@@ -386,6 +386,24 @@ pub const NO_TEAM_LIBRARIES: &str = "team libraries on a server need the desktop
 
 /// Why an edit of a server file you joined with a view link is refused.
 pub const VIEW_ONLY: &str = "View only: the link you joined with lets you see this file, not change it";
+/// Why an edit other than to comment threads of a server file you joined with a comment link is
+/// refused.
+pub const COMMENT_ONLY: &str = "Can comment: the link you joined with lets you see this file and comment on it, not change it";
+
+/// Why a session document can't be edited with `access` (`None`: it can).
+pub(crate) fn limited_by(access: Access) -> Option<&'static str> {
+    match access {
+        Access::Edit => None,
+        Access::View => Some(VIEW_ONLY),
+        Access::Comment => Some(COMMENT_ONLY),
+    }
+}
+
+/// Whether `tool` is one a file you can't edit now leaves you (`why`: what
+/// [`Session::live_read_only`] says): moving around and, with a comment link, commenting.
+pub fn tool_left(why: &str, tool: ToolId) -> bool {
+    matches!(tool, ToolId::Move | ToolId::Hand) || (why == COMMENT_ONLY && tool == ToolId::Comment)
+}
 /// Why an edit of a file on its way to a server is refused.
 pub const PUBLISHING: &str = "The file is being published: you can edit it again once it is on the server";
 
